@@ -1,0 +1,45 @@
+#cloud-config
+manage_etc_hosts: false
+package_update: false
+package_upgrade: false
+write_files:
+  - path: /usr/local/bin/packscope-vm-test
+    permissions: '0755'
+    content: |
+      #!/bin/sh
+      set -eu
+      exec >/dev/ttyS0 2>&1
+      trap 'echo PACKSCOPE_VM_FAIL; poweroff -f' EXIT
+      echo PACKSCOPE_VM_BEGIN
+      mkdir -p /tmp/packscope-vm
+      cd /tmp/packscope-vm
+      make_pkg() {
+        name="$1"; version="$2"; depends="$3"
+        mkdir -p "$name-$version/DEBIAN" "$name-$version/usr/share/$name"
+        printf 'Package: %s\nVersion: %s\nArchitecture: all\nMaintainer: PackScope Test <test@example.invalid>\nDescription: isolated test fixture\n' "$name" "$version" > "$name-$version/DEBIAN/control"
+        if [ -n "$depends" ]; then printf 'Depends: %s\n' "$depends" >> "$name-$version/DEBIAN/control"; fi
+        echo fixture > "$name-$version/usr/share/$name/test"
+        dpkg-deb --build "$name-$version" >/dev/null
+      }
+      make_pkg packscope-vm-demo 1.0 ''
+      make_pkg packscope-vm-demo 2.0 ''
+      make_pkg packscope-vm-client 1.0 'packscope-vm-demo'
+      make_pkg packscope-vm-single 1.0 ''
+      apt-get -s install ./packscope-vm-demo-1.0.deb ./packscope-vm-client-1.0.deb ./packscope-vm-single-1.0.deb >/tmp/install-plan
+      apt-get -y install ./packscope-vm-demo-1.0.deb ./packscope-vm-client-1.0.deb ./packscope-vm-single-1.0.deb >/tmp/install-log
+      dpkg-query -W -f='${Status}' packscope-vm-demo | grep -q 'install ok installed'
+      apt-get -s install --only-upgrade ./packscope-vm-demo-2.0.deb >/tmp/upgrade-plan
+      apt-get -y install --only-upgrade ./packscope-vm-demo-2.0.deb >/tmp/upgrade-log
+      test "$(dpkg-query -W -f='${Version}' packscope-vm-demo)" = 2.0
+      apt-get -s remove -- packscope-vm-demo >/tmp/remove-plan
+      grep -q '^Remv packscope-vm-demo ' /tmp/remove-plan
+      grep -q '^Remv packscope-vm-client ' /tmp/remove-plan
+      apt-get -s remove -- packscope-vm-single >/tmp/remove-single-plan
+      grep -q '^Remv packscope-vm-single ' /tmp/remove-single-plan
+      apt-get -y remove -- packscope-vm-single >/tmp/remove-log
+      ! dpkg-query -W -f='${Status}' packscope-vm-single 2>/dev/null | grep -q 'install ok installed'
+      echo PACKSCOPE_VM_SUCCESS
+      trap - EXIT
+      poweroff -f
+runcmd:
+  - [ /usr/local/bin/packscope-vm-test ]
