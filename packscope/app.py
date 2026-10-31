@@ -1,33 +1,60 @@
 """PackScope's Qt interface for managing Ubuntu software."""
 import sys
 import shlex
+import json
+import re
 from datetime import datetime
 from pathlib import Path
-from PyQt5.QtCore import (QAbstractTableModel, QEvent, QLibraryInfo, QModelIndex, QObject, QSortFilterProxyModel,
+from PyQt5.QtCore import (QAbstractTableModel, QEvent, QLibraryInfo, QModelIndex, QObject, QSettings, QSortFilterProxyModel,
                           Qt, QThread, QTimer, QTranslator, pyqtSignal)
-from PyQt5.QtGui import QFont
+from PyQt5.QtGui import QColor, QFont
 from PyQt5.QtWidgets import (QAbstractItemView, QApplication, QFrame, QHBoxLayout, QHeaderView,
                              QLabel, QLineEdit, QMainWindow, QPushButton, QSplitter,
                              QTableView, QVBoxLayout, QWidget, QScrollArea, QDialog,
                              QDialogButtonBox, QFileDialog, QMessageBox, QPlainTextEdit,
-                             QInputDialog, QProgressBar, QToolButton, QMenu, QComboBox)
+                             QInputDialog, QProgressBar, QToolButton, QMenu, QComboBox,
+                             QColorDialog, QGridLayout)
 from packscope.inventory import scan_all
 from packscope.inventory import Package
 from packscope import actions, backend, launch
 
 # Warm neutrals and restrained orange, informed by Ubuntu's colour palette.
 DARK = {'bg':'#1b191b','panel':'#252225','surface':'#302b2c','text':'#f2eeeb','sub':'#c4b8b1',
-        'border':'#49403e','accent':'#f29879','accenttext':'#231a18','selection':'#4a3431'}
+        'border':'#49403e','accent':'#f29879','accenttext':'#231a18','selection':'#4a3431','output':'#111111'}
 LIGHT = {'bg':'#f2f0ed','panel':'#fffdfa','surface':'#eee9e5','text':'#292321','sub':'#625956',
-         'border':'#d9d1cb','accent':'#933f29','accenttext':'#ffffff','selection':'#f2ddd4'}
+         'border':'#d9d1cb','accent':'#933f29','accenttext':'#ffffff','selection':'#f2ddd4','output':'#fffdfa'}
+
+CUSTOM_KEYS = ('bg','panel','text','accent','output')
+
+
+def mix_color(first, second, amount):
+    a, b = QColor(first), QColor(second)
+    return QColor(*(round(x * (1-amount) + y * amount) for x,y in zip(a.getRgb()[:3], b.getRgb()[:3]))).name()
+
+
+def valid_custom_colors(value):
+    if not isinstance(value, dict) or any(not isinstance(value.get(k), str) or not re.fullmatch(r'#[0-9a-fA-F]{6}',value[k]) for k in CUSTOM_KEYS):
+        return None
+    return {key:value[key].lower() for key in CUSTOM_KEYS}
+
+
+def custom_palette(colors):
+    c = dict(colors)
+    c['surface'] = mix_color(c['bg'], c['panel'], .65)
+    c['border'] = mix_color(c['panel'], c['text'], .24)
+    c['sub'] = mix_color(c['text'], c['panel'], .35)
+    c['selection'] = mix_color(c['panel'], c['accent'], .22)
+    c['accenttext'] = '#ffffff' if QColor(c['accent']).lightness() < 128 else '#181818'
+    return c
 
 
 def stylesheet(c):
-    chevron = (Path(__file__).resolve().parent/'icons'/('chevron-dark.svg' if c is DARK else 'chevron-light.svg')).as_posix()
+    chevron = (Path(__file__).resolve().parent/'icons'/('chevron-dark.svg' if QColor(c['surface']).lightness() < 128 else 'chevron-light.svg')).as_posix()
     return f'''
     QMainWindow, QWidget#root {{ background: {c['bg']}; color: {c['text']}; font-family: "Noto Sans CJK TC", "Noto Sans", sans-serif; font-size: 13px; }}
     QDialog {{ background: {c['panel']}; color: {c['text']}; }}
     QFrame#details {{ background: {c['panel']}; border: 1px solid {c['border']}; border-radius: 7px; }}
+    QFrame#themeCard {{ background: {c['panel']}; border: 1px solid {c['border']}; border-radius: 6px; }}
     QLabel {{ color: {c['text']}; background: transparent; }}
     QLabel#muted {{ color: {c['sub']}; }}
     QLabel#title {{ font-size: 23px; font-weight: 700; }}
@@ -37,8 +64,8 @@ def stylesheet(c):
     QLineEdit {{ background: {c['panel']}; color: {c['text']}; border: 1px solid {c['border']}; border-radius: 5px; padding: 10px 12px; selection-background-color: {c['selection']}; selection-color: {c['text']}; }}
     QLineEdit:focus {{ border: 1px solid {c['accent']}; }}
     QPlainTextEdit {{ background: {c['bg']}; color: {c['text']}; border: 1px solid {c['border']}; border-radius: 5px; padding: 8px; selection-background-color: {c['selection']}; }}
-    QFrame#operation {{ background: #111111; border: 1px solid {c['border']}; border-radius: 6px; }}
-    QPlainTextEdit#operationOutput {{ background: #111111; color: #eeeeee; border: 0; padding: 6px; selection-background-color: {c['selection']}; }}
+    QFrame#operation {{ background: {c['output']}; border: 1px solid {c['border']}; border-radius: 6px; }}
+    QPlainTextEdit#operationOutput {{ background: {c['output']}; color: {c['text']}; border: 0; padding: 6px; selection-background-color: {c['selection']}; }}
     QProgressBar {{ background: {c['surface']}; border: 0; border-radius: 3px; min-height: 7px; max-height: 7px; }}
     QProgressBar::chunk {{ background: {c['accent']}; border-radius: 3px; }}
     QPushButton {{ color: {c['text']}; background: {c['surface']}; border: 1px solid {c['border']}; border-radius: 5px; padding: 9px 12px; }}
@@ -214,10 +241,50 @@ class OperationTask(QThread):
             self.result_ready.emit(None, str(exc) or type(exc).__name__)
 
 
+class ThemeEditor(QDialog):
+    """Edit a draft palette; changes are applied only after saving."""
+    def __init__(self, colors, parent=None):
+        super().__init__(parent); self.setWindowTitle('自訂配色'); self.setMinimumWidth(440)
+        self.colors=dict(colors); self.color_buttons={}
+        layout=QVBoxLayout(self); layout.setContentsMargins(22,20,22,20); layout.setSpacing(14)
+        layout.addWidget(QLabel('選擇你喜歡的顏色組合'))
+        grid=QGridLayout(); grid.setVerticalSpacing(10)
+        for row,(key,label) in enumerate((('bg','視窗背景'),('panel','面板'),('text','文字'),('accent','重點顏色'),('output','輸出欄'))):
+            grid.addWidget(QLabel(label),row,0)
+            button=QPushButton(); button.setMinimumWidth(150)
+            button.setObjectName('color-'+key)
+            button.clicked.connect(lambda checked=False,k=key:self.pick_color(k))
+            grid.addWidget(button,row,1); self.color_buttons[key]=button
+        layout.addLayout(grid)
+        self.preview=QLabel('配色預覽     文字與輸出內容'); self.preview.setMinimumHeight(54); self.preview.setAlignment(Qt.AlignCenter); layout.addWidget(self.preview)
+        buttons=QDialogButtonBox(QDialogButtonBox.Save|QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Save).setText('儲存並套用'); buttons.button(QDialogButtonBox.Cancel).setText('取消')
+        buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject); layout.addWidget(buttons)
+        self.update_preview()
+    def pick_color(self, key):
+        selected=QColorDialog.getColor(QColor(self.colors[key]), self, '選擇顏色', options=QColorDialog.DontUseNativeDialog)
+        if selected.isValid(): self.colors[key]=selected.name(); self.update_preview()
+    def update_preview(self):
+        for key,button in self.color_buttons.items():
+            color=self.colors[key]; fg='#ffffff' if QColor(color).lightness()<128 else '#181818'
+            button.setText(color.upper()); button.setStyleSheet(f'QPushButton {{ background: {color}; color: {fg}; border: 1px solid #888888; border-radius: 5px; padding: 8px 12px; }}')
+        c=custom_palette(self.colors)
+        self.preview.setStyleSheet(f"background: {c['output']}; color: {c['text']}; border: 1px solid {c['accent']}; border-radius: 5px; padding: 8px;")
+
+
 class Window(QMainWindow):
-    def __init__(self):
+    def __init__(self, settings=None):
         super().__init__(); self.setWindowTitle('PackScope — 軟體透視'); self.resize(1350, 820); self.setMinimumSize(920, 580)
-        self.is_dark = True; self.results = []; self.thread = None; self.jobs = set(); self.operation_busy = False; self.manual_scan_pending = False; self.refresh_after_scan = False; self.buttons = {}
+        self.settings = settings if settings is not None else QSettings('PackScope','PackScope')
+        try: stored=json.loads(self.settings.value('theme/custom','{}',type=str))
+        except (TypeError,ValueError): stored={}
+        self.custom_colors=valid_custom_colors(stored)
+        self.has_custom=self.custom_colors is not None
+        if not self.has_custom: self.custom_colors={k:DARK[k] for k in CUSTOM_KEYS}
+        self.theme_name=self.settings.value('theme/selected','dark',type=str)
+        if self.theme_name not in ('dark','light','custom'): self.theme_name='dark'
+        self.current_colors=DARK; self.is_dark=True
+        self.results = []; self.thread = None; self.jobs = set(); self.operation_busy = False; self.manual_scan_pending = False; self.refresh_after_scan = False; self.buttons = {}
         self.launch_generation = 0; self.launch_targets = []
         self.launch_timer = QTimer(self); self.launch_timer.setSingleShot(True); self.launch_timer.timeout.connect(self.discover_launchers)
         self.build(); self.apply_theme(); self.refresh()
@@ -283,8 +350,44 @@ class Window(QMainWindow):
         vertical_splitter.addWidget(self.operation_panel); vertical_splitter.setStretchFactor(0,1); vertical_splitter.setStretchFactor(1,0); vertical_splitter.setSizes([600,110])
         vertical_splitter.handle(1).setToolTip('拖曳調整輸出區高度')
         self.status=self.label('正在準備…','muted',True); main.addWidget(self.status)
-    def apply_theme(self): self.setStyleSheet(stylesheet(DARK if self.is_dark else LIGHT))
-    def toggle_theme(self): self.is_dark=not self.is_dark; self.apply_theme()
+    def apply_theme(self):
+        self.current_colors = {'dark':DARK, 'light':LIGHT, 'custom':custom_palette(self.custom_colors)}[self.theme_name]
+        self.is_dark=QColor(self.current_colors['panel']).lightness()<128
+        self.setStyleSheet(stylesheet(self.current_colors))
+    def set_theme(self, name, persist=True):
+        if name not in ('dark','light','custom'): raise ValueError('未知主題。')
+        self.theme_name=name; self.apply_theme()
+        if persist: self.settings.setValue('theme/selected',name); self.settings.sync()
+    def edit_custom_theme(self):
+        initial=self.custom_colors if self.has_custom else {k:self.current_colors[k] for k in CUSTOM_KEYS}
+        editor=ThemeEditor(initial,self)
+        if editor.exec_() != QDialog.Accepted: return False
+        colors=valid_custom_colors(editor.colors)
+        if colors is None: return False
+        self.custom_colors=colors; self.has_custom=True
+        self.settings.setValue('theme/custom',json.dumps(colors,ensure_ascii=False))
+        self.set_theme('custom'); return True
+    def toggle_theme(self):
+        dialog=QDialog(self); dialog.setWindowTitle('選擇主題'); dialog.setMinimumWidth(580)
+        layout=QVBoxLayout(dialog); layout.setContentsMargins(22,20,22,20); layout.setSpacing(16)
+        layout.addWidget(self.label('選擇主題','section'))
+        cards=QHBoxLayout(); cards.setSpacing(10); layout.addLayout(cards)
+        for key,title,colors in (('dark','深色',DARK),('light','淺色',LIGHT),('custom','自訂',custom_palette(self.custom_colors))):
+            card=QFrame(); card.setObjectName('themeCard'); card_layout=QVBoxLayout(card); card_layout.setSpacing(8)
+            card_layout.addWidget(self.label(title,'caption'))
+            swatches=QHBoxLayout(); swatches.setSpacing(4)
+            for color in (colors['bg'],colors['panel'],colors['accent'],colors['output']):
+                swatch=QLabel(); swatch.setFixedSize(26,26); swatch.setStyleSheet(f'background: {color}; border: 1px solid {colors["border"]}; border-radius: 4px;'); swatches.addWidget(swatch)
+            swatches.addStretch(); card_layout.addLayout(swatches)
+            button=QPushButton('使用中' if self.theme_name==key else '套用'); button.setEnabled(self.theme_name!=key)
+            button.setObjectName('theme-'+key)
+            def choose(checked=False,theme=key): self.set_theme(theme); dialog.accept()
+            button.clicked.connect(choose); card_layout.addWidget(button); cards.addWidget(card)
+        controls=QHBoxLayout(); customize=QPushButton('自訂配色…'); customize.setObjectName('theme-customize'); controls.addWidget(customize); controls.addStretch()
+        close=QPushButton('關閉'); close.clicked.connect(dialog.reject); controls.addWidget(close); layout.addLayout(controls)
+        def customize_theme():
+            if self.edit_custom_theme(): dialog.accept()
+        customize.clicked.connect(customize_theme); dialog.exec_()
     def select_manager(self, name):
         for key, button in self.buttons.items(): button.setChecked(key==name)
         self.proxy.set_manager(name); self.clear_details(); self.update_count()
@@ -419,7 +522,7 @@ class Window(QMainWindow):
         dialog.setComboBoxEditable(False); dialog.setMinimumWidth(360)
         dialog.setOkButtonText('繼續'); dialog.setCancelButtonText('取消')
         combo=dialog.findChild(QComboBox)
-        colors=DARK if self.is_dark else LIGHT
+        colors=self.current_colors
         combo.view().window().setStyleSheet(
             f"QFrame {{ background: {colors['panel']}; border: 1px solid {colors['border']}; }} "
             f"QListView {{ color: {colors['text']}; background: {colors['panel']}; border: none; "

@@ -110,7 +110,7 @@ class OutputUITests(unittest.TestCase):
             try:
                 self.wait_for(lambda:w.thread is None)
                 for dark in (True,False):
-                    if not dark: w.toggle_theme()
+                    if not dark: w.set_theme('light',persist=False)
                     def accept_snap():
                         dialog=self.app.activeModalWidget(); combo=dialog.findChild(QComboBox)
                         combo.showPopup(); self.app.processEvents()
