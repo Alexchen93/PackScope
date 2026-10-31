@@ -10,7 +10,7 @@ from PyQt5.QtWidgets import (QAbstractItemView, QApplication, QFrame, QHBoxLayou
                              QLabel, QLineEdit, QMainWindow, QPushButton, QSplitter,
                              QTableView, QVBoxLayout, QWidget, QScrollArea, QDialog,
                              QDialogButtonBox, QFileDialog, QMessageBox, QPlainTextEdit,
-                             QInputDialog, QProgressBar, QToolButton, QMenu)
+                             QInputDialog, QProgressBar, QToolButton, QMenu, QComboBox)
 from packscope.inventory import scan_all
 from packscope.inventory import Package
 from packscope import actions, backend, launch
@@ -402,7 +402,7 @@ class Window(QMainWindow):
             self.status.setText('詳細資料讀取完成。' if not error else '詳細資料讀取失敗。')
             self.log_event(f'{package.name} 的詳細資料' + (f'讀取失敗：{error}' if error else '已讀取。'))
             if error: QMessageBox.warning(self,'無法讀取詳細資料',error)
-            else: self.text_dialog(f'{package.name} — 完整資料',result)
+            else: self.text_dialog(f'{package.name} — 完整資料','\n'.join(line.lstrip() for line in result.splitlines()))
         self.run_task(lambda:backend.details(package),done)
     def install_software(self):
         if self.operation_busy: return
@@ -413,9 +413,22 @@ class Window(QMainWindow):
         except (OSError, ValueError) as error:
             QMessageBox.warning(self,'無法安裝',str(error)); return
         self.perform_operation(operation.package,'install',operation=operation)
+    def choose_install_source(self):
+        dialog=QInputDialog(self); dialog.setWindowTitle('安裝軟體'); dialog.setLabelText('選擇套件來源：')
+        dialog.setComboBoxItems(('APT / dpkg','Snap','Flatpak','AppImage','pipx','npm global','Cargo'))
+        dialog.setComboBoxEditable(False); dialog.setMinimumWidth(360)
+        dialog.setOkButtonText('繼續'); dialog.setCancelButtonText('取消')
+        combo=dialog.findChild(QComboBox)
+        colors=DARK if self.is_dark else LIGHT
+        combo.view().window().setStyleSheet(
+            f"QFrame {{ background: {colors['panel']}; border: 1px solid {colors['border']}; }} "
+            f"QListView {{ color: {colors['text']}; background: {colors['panel']}; border: none; "
+            f"selection-background-color: {colors['selection']}; selection-color: {colors['text']}; outline: none; }}")
+        accepted=dialog.exec_() == QDialog.Accepted
+        return dialog.textValue(),accepted
     def install_by_name(self):
         if self.operation_busy: return
-        source,ok=QInputDialog.getItem(self,'安裝軟體','選擇套件來源：',('APT / dpkg','Snap','Flatpak','AppImage','pipx','npm global','Cargo'),0,False)
+        source,ok=self.choose_install_source()
         if not ok: return
         if source == 'AppImage':
             path,_=QFileDialog.getOpenFileName(self,'選擇 AppImage 檔案','','AppImage (*.AppImage *.appimage)',options=QFileDialog.DontUseNativeDialog)

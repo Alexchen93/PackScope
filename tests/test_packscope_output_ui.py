@@ -7,7 +7,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
-from PyQt5.QtWidgets import QApplication, QMessageBox, QFileDialog
+from PyQt5.QtCore import QTimer
+from PyQt5.QtWidgets import QApplication, QMessageBox, QFileDialog, QComboBox
 from packscope.app import Window
 from packscope.inventory import Package, ScanResult
 
@@ -86,6 +87,42 @@ class OutputUITests(unittest.TestCase):
                     released.set()
                     self.wait_for(lambda:not w.jobs and w.thread is None)
                     w.close(); self.app.processEvents()
+
+    def test_details_align_indented_metadata_at_the_left_edge(self):
+        p=Package('Example','org.example.App/x86_64/stable','1','Flatpak','使用者')
+        metadata='Flatpak 已安裝資料\n\n  ID: org.example.App\n    Ref: app/org.example.App/x86_64/stable\n\n    Commit: abc123\n'
+        with patch('packscope.app.scan_all',return_value=[ScanResult('Flatpak',[p],'ok')]), \
+             patch('packscope.backend.details',return_value=metadata):
+            w=Window(); w.show(); shown=[]
+            try:
+                self.wait_for(lambda:w.thread is None)
+                w.selected_package=lambda:p
+                w.text_dialog=lambda title,content:shown.append((title,content))
+                w.show_more(); self.wait_for(lambda:not w.jobs)
+                self.assertEqual(shown[0][1], 'Flatpak 已安裝資料\n\nID: org.example.App\nRef: app/org.example.App/x86_64/stable\n\nCommit: abc123')
+            finally:
+                self.wait_for(lambda:not w.jobs and w.thread is None)
+                w.close(); self.app.processEvents()
+
+    def test_source_dialog_selection_and_cancellation_in_both_themes(self):
+        with patch('packscope.app.scan_all',return_value=[]):
+            w=Window(); w.show()
+            try:
+                self.wait_for(lambda:w.thread is None)
+                for dark in (True,False):
+                    if not dark: w.toggle_theme()
+                    def accept_snap():
+                        dialog=self.app.activeModalWidget(); combo=dialog.findChild(QComboBox)
+                        combo.showPopup(); self.app.processEvents()
+                        self.assertEqual(combo.view().window().palette().window().color().name(), '#252225' if dark else '#fffdfa')
+                        combo.hidePopup(); combo.setCurrentText('Snap'); dialog.accept()
+                    QTimer.singleShot(0,accept_snap)
+                    self.assertEqual(w.choose_install_source(),('Snap',True))
+                    QTimer.singleShot(0,lambda:self.app.activeModalWidget().reject())
+                    self.assertFalse(w.choose_install_source()[1])
+            finally:
+                self.wait_for(lambda:not w.jobs and w.thread is None)
+                w.close(); self.app.processEvents()
 
     def test_empty_at_start_and_keeps_multiple_actions_and_refresh(self):
         first=Package('First','first','1','APT / dpkg','系統')
