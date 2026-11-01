@@ -1,6 +1,6 @@
 # PackScope 0.2.0 開發版
 
-PackScope 是以 bauh 為基底的 Ubuntu 軟體管理介面，使用 PyQt5。
+PackScope 是使用 PyQt5 的 Ubuntu 軟體管理介面。
 
 ## 啟動
 
@@ -24,7 +24,7 @@ cd PackScope
 
 ## 範圍與依賴
 
-需要 Python 3、PyQt5、bauh 的 Python 相依套件，以及所使用來源的系統工具。部分系統工具可能未安裝。系統權限操作需要 `pkexec` 和可用的圖形化 polkit 授權代理。
+需要 Python 3、PyQt5、程式所需的 Python 相依套件，以及所使用來源的系統工具。部分系統工具可能未安裝。系統權限操作需要 `pkexec` 和可用的圖形化 polkit 授權代理。
 
 APT 清單包含系統程式庫；Flatpak 也包含執行環境。AppImage 僅掃描 `~/Applications`、`~/AppImages`、`~/Downloads` 第一層和 bauh 安裝紀錄。開發工具只涵蓋目前使用者的 pipx、目前 PATH 中 npm 的全域環境與目前 CARGO_HOME。
 
@@ -33,7 +33,3 @@ APT 更新查詢使用本機套件清單，Flatpak 使用本機快取，Snap 會
 ## 製作 Ubuntu 安裝套件
 
 在已安裝 `dpkg-deb` 的 Ubuntu 電腦上，從專案根目錄執行 `sh packaging/build-deb.sh`。產生的檔案位於 `dist/`；安裝後可從應用程式選單或執行 `packscope` 開啟。Flatpak、Snap 等來源仍需要各自的套件管理器。
-
-## 上游
-
-基於 [bauh](https://github.com/vinifmor/bauh)，上游提交 `b1ea479a3aed504e0ddc329f2474e9a93331927c`。原始程式碼與授權保留在專案根目錄。
