@@ -5,9 +5,9 @@ import re
 import time
 from datetime import datetime
 from pathlib import Path
-from PyQt5.QtCore import (QAbstractTableModel, QEvent, QLibraryInfo, QModelIndex, QSettings, QSortFilterProxyModel,
+from PyQt5.QtCore import (QAbstractTableModel, QEvent, QLibraryInfo, QModelIndex, QSettings, QSortFilterProxyModel, QUrl,
                           Qt, QThread, QTimer, QTranslator, pyqtSignal)
-from PyQt5.QtGui import QColor, QFont, QIcon
+from PyQt5.QtGui import QColor, QDesktopServices, QFont, QIcon
 from PyQt5.QtWidgets import (QAbstractItemView, QApplication, QFrame, QHBoxLayout, QHeaderView,
                              QLabel, QLineEdit, QMainWindow, QPushButton, QSplitter,
                              QTableView, QVBoxLayout, QWidget, QScrollArea, QDialog,
@@ -544,7 +544,11 @@ class Window(QMainWindow):
     def show_log_location(self):
         if not self.session_log:
             QMessageBox.warning(self,'操作日誌','無法寫入日誌；請檢查輸出區的錯誤與目錄權限。'); return
-        QMessageBox.information(self,'操作日誌',f'本次日誌：\n{self.session_log.path}\n\n其他執行紀錄在同一資料夾。日誌可能包含套件名稱、檔案路徑及工具輸出；分享前請檢查個人資訊。')
+        box=QMessageBox(QMessageBox.Information,'操作日誌',f'本次日誌：\n{self.session_log.path}\n\n其他執行紀錄在同一資料夾，請自行管理不再需要的日誌。日誌可能包含套件名稱、檔案路徑及工具輸出；分享前請檢查個人資訊。',QMessageBox.Close,self)
+        open_folder=box.addButton('開啟日誌資料夾',QMessageBox.ActionRole)
+        box.exec_()
+        if box.clickedButton() == open_folder and not QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.session_log.path.parent))):
+            QMessageBox.warning(self,'無法開啟','無法開啟日誌資料夾，請使用檔案管理員開啟上述路徑。')
     def manual_refresh(self):
         if self.operation_busy or self.thread is not None: return
         self.manual_scan_pending=True; self.log_event('開始重新掃描軟體清單。'); self.refresh()
@@ -708,6 +712,7 @@ class Window(QMainWindow):
             'pipx\n在獨立 Python 虛擬環境中管理應用程式。\n\n'
             'npm global\n目前 Node.js 環境中的全域套件與工具。\n\n'
             'Cargo\n由 Cargo 安裝到目前 Cargo 環境的 Rust 工具。\n\n'
+            '更新檢查：APT 與 Flatpak 使用本機快取，Snap 連線查詢；開發工具與 AppImage 尚未統一檢查。可在更新選項中重新取得套件資訊。\n\n'
             '清單顯示的是目前的管理方式，不一定能確定最初如何安裝。')
     def text_dialog(self, title, content):
         dialog=QDialog(self); dialog.setWindowTitle(title); dialog.resize(760,580)
@@ -947,6 +952,8 @@ class Window(QMainWindow):
         summary=f'找到 {len(self.model.updates)} 個可勾選更新'
         if unmatched: summary+=f'；{unmatched} 項無法對應本機清單，請重新掃描'
         if failures: summary+='；部分來源查詢失敗：'+'；'.join(failures)
+        if any(name == 'APT / dpkg' or name.startswith('Flatpak / ') for name,note,entries,error in sections): summary+='；APT／Flatpak 使用本機快取'
+        if any('尚未檢查' in note for name,note,entries,error in sections): summary+='；部分來源尚未檢查'
         self.status.setText(summary+'。請在表格勾選；篩選條件可能隱藏部分項目。')
         self.status.setToolTip('\n'.join(f'{name}：{error or note}' for name,note,entries,error in sections))
         self.show_detail(QModelIndex(),QModelIndex())

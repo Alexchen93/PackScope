@@ -107,6 +107,7 @@ class ImprovementTests(unittest.TestCase):
                 self.wait_for(lambda:w.thread is None)
                 w.app_filter.setCurrentIndex(1)
                 w.show_updates(sections)
+                self.assertIn('使用本機快取',w.status.text())
                 self.assertEqual(w.proxy.rowCount(),2)
                 for row in range(2):
                     self.assertTrue(w.proxy.setData(w.proxy.index(row,4),Qt.Checked,Qt.CheckStateRole))
