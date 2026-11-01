@@ -29,11 +29,11 @@ PackScope 將不同來源的軟體整理到同一個介面。從搜尋、查看�
 
 ### 下載安裝檔
 
-1. [下載 PackScope DEB 安裝檔](https://github.com/Alexchen93/PackScope/releases/download/v0.2.0-dev.1/packscope_0.2.0~dev1_all.deb)。
+1. [下載 PackScope DEB 安裝檔](https://github.com/Alexchen93/PackScope/releases/download/v0.2.0-dev.1/packscope_0.2.0.dev1_all.deb)。
 2. 在檔案管理員中用軟體安裝程式開啟下載的 `.deb`，依畫面提示安裝。若系統沒有提供此選項，可在下載資料夾開啟終端機執行：
 
    ```bash
-   sudo apt install ./packscope_0.2.0~dev1_all.deb
+   sudo apt install ./packscope_0.2.0.dev1_all.deb
    ```
 
 3. 安裝後，從應用程式選單開啟 **PackScope**，或在終端機執行 `packscope`。安裝時套件管理器會處理所需的系統依賴。
