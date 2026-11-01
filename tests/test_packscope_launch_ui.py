@@ -50,9 +50,9 @@ class LaunchUITests(unittest.TestCase):
                 for source in ('.deb','Snap','Flatpak','AppImage','pipx','npm global','Cargo'):
                     self.assertIn(source,text)
                 self.assertIn('不一定能確定',text)
-                window.search.setText('first'); window.table.selectRow(0)
+                window.search.setText('first'); self.wait_for(lambda:window.proxy.query == 'first'); window.table.selectRow(0)
                 self.wait_for(entered.is_set)
-                window.search.setText('second'); window.table.selectRow(0)
+                window.search.setText('second'); self.wait_for(lambda:window.proxy.query == 'second'); window.table.selectRow(0)
                 self.wait_for(second_seen.is_set)
                 release.set(); self.wait_for(lambda:not window.jobs)
                 self.assertFalse(window.open_button.isEnabled())

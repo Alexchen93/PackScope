@@ -1,6 +1,7 @@
 """Read-only inventory. No installation, privilege escalation or updates."""
 from dataclasses import dataclass
 from dataclasses import replace
+from concurrent.futures import ThreadPoolExecutor
 import configparser
 import glob
 import hashlib
@@ -251,13 +252,19 @@ def cargo():
     return ScanResult('Cargo', rows, 'ok', '僅讀取目前 CARGO_HOME 的安裝紀錄。')
 
 
+def _scan_source(source):
+    name, fn = source
+    try:
+        return fn()
+    except Exception as error:
+        logging.getLogger('packscope').exception('Inventory scan failed for %s', name)
+        detail = str(error).splitlines()[0][:200] if str(error) else type(error).__name__
+        return ScanResult(name, [], "error", f"讀取失敗：{detail}")
+
+
 def scan_all():
-    results = []
-    for name, fn in [("APT / dpkg", debian), ("Snap", snap), ("Flatpak", flatpak), ("AppImage", appimage),
-                     ('pipx', pipx), ('npm global', npm), ('Cargo', cargo)]:
-        try:
-            results.append(fn())
-        except Exception as error:
-            detail = str(error).splitlines()[0][:200] if str(error) else type(error).__name__
-            results.append(ScanResult(name, [], "error", f"讀取失敗：{detail}"))
-    return results
+    sources = [("APT / dpkg", debian), ("Snap", snap), ("Flatpak", flatpak), ("AppImage", appimage),
+               ('pipx', pipx), ('npm global', npm), ('Cargo', cargo)]
+    # Return results in the same order even when sources finish out of order.
+    with ThreadPoolExecutor(max_workers=len(sources), thread_name_prefix='packscope-scan') as executor:
+        return list(executor.map(_scan_source, sources))

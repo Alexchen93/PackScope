@@ -335,8 +335,34 @@ def progress_value(line, manager):
     return max(0, min(99, int(float(match.group(1)))))
 
 
+def check_dpkg_health():
+    """Read package states without requiring root or modifying the database."""
+    env = dict(os.environ, LC_ALL='C', LANGUAGE='C')
+    try:
+        result = subprocess.run([_binary('dpkg-query'), '-W', '-f=${binary:Package}\t${db:Status-Status}\n'],
+                                stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                errors='replace', env=env, timeout=20, check=True)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f'無法確認 dpkg 套件狀態，已停止 APT 操作：{exc}') from exc
+    incomplete=[]; parsed=0
+    for line in result.stdout.splitlines():
+        name, sep, status=line.partition('\t')
+        if sep and name and status: parsed+=1
+        if sep and status in ('half-installed', 'half-configured', 'unpacked'):
+            incomplete.append(f'{name}（{status}）')
+    if not parsed:
+        raise RuntimeError('無法解析 dpkg 套件狀態，已停止 APT 操作。')
+    if incomplete:
+        raise RuntimeError('偵測到尚未完成設定的 dpkg 套件，已停止 APT 操作，避免再次連帶失敗：\n'
+                           + '\n'.join(incomplete[:30])
+                           + ('\n其他項目請以 dpkg --audit 檢查。' if len(incomplete)>30 else '')
+                           + '\n請先檢查這些套件的錯誤並修復；PackScope 不會自動執行修復。')
+
+
 def execute(operation: Operation, on_output=None, on_progress=None) -> str:
     """Run one user-confirmed operation; system authentication is handled by polkit."""
+    if operation.package.manager == 'APT / dpkg':
+        check_dpkg_health()
     if operation.package.manager == 'AppImage' and operation.action == 'install':
         output = install_appimage(operation.package.location, on_progress)
         if on_output: on_output(output)

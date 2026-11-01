@@ -24,3 +24,12 @@ QT_QPA_PLATFORM=offscreen python3 -m unittest discover -s tests -p 'test_packsco
 
 Changes to authentication, installation, updating, or removal should also be
 validated in an Ubuntu desktop environment; see `packscope/SAFETY.md`.
+
+The Ubuntu 24.04 CI workflow checks syntax, basic whitespace, tests, and DEB
+build metadata. The separate manual release checklist is in
+`tests/vm/release-checklist.md`; the native desktop and polkit checks cannot be
+replaced by offscreen CI.
+
+For an optional read-only scan and synthetic filter benchmark, run
+`PYTHONPATH=. python3 tests/benchmark_packscope.py`. Results depend on the
+machine, installed managers, and filesystem cache; it is not a pass/fail test.

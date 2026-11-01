@@ -1,12 +1,11 @@
 """PackScope's Qt interface for managing Ubuntu software."""
 import sys
-import shlex
 import json
 import re
 import time
 from datetime import datetime
 from pathlib import Path
-from PyQt5.QtCore import (QAbstractTableModel, QEvent, QLibraryInfo, QModelIndex, QObject, QSettings, QSortFilterProxyModel,
+from PyQt5.QtCore import (QAbstractTableModel, QEvent, QLibraryInfo, QModelIndex, QSettings, QSortFilterProxyModel,
                           Qt, QThread, QTimer, QTranslator, pyqtSignal)
 from PyQt5.QtGui import QColor, QFont, QIcon
 from PyQt5.QtWidgets import (QAbstractItemView, QApplication, QFrame, QHBoxLayout, QHeaderView,
@@ -14,10 +13,13 @@ from PyQt5.QtWidgets import (QAbstractItemView, QApplication, QFrame, QHBoxLayou
                              QTableView, QVBoxLayout, QWidget, QScrollArea, QDialog,
                              QDialogButtonBox, QFileDialog, QMessageBox, QPlainTextEdit,
                              QInputDialog, QProgressBar, QToolButton, QMenu, QComboBox,
-                             QColorDialog, QGridLayout, QCheckBox, QTableWidget, QTableWidgetItem)
+                             QCheckBox)
 from packscope.inventory import scan_all
 from packscope.inventory import Package
 from packscope import actions, backend, launch
+from packscope.tasks import Worker, Task, OperationTask, BatchOperationTask
+from packscope.theme_editor import ThemeEditor
+from packscope.session_log import SessionLog
 
 # Warm neutrals and restrained orange, informed by Ubuntu's colour palette.
 DARK = {'bg':'#1b191b','panel':'#252225','surface':'#302b2c','text':'#f2eeeb','sub':'#c4b8b1',
@@ -76,6 +78,10 @@ def stylesheet(c):
     QToolButton#install {{ color: {c['text']}; background: {c['surface']}; border: 1px solid {c['border']}; border-radius: 5px; padding: 9px 12px; }}
     QToolButton#install:hover {{ border-color: {c['accent']}; }}
     QToolButton#install:disabled {{ color: {c['sub']}; background: {c['panel']}; }}
+    QToolButton#updateMenu {{ color: {c['text']}; background: {c['surface']}; border: 1px solid {c['border']}; border-radius: 5px; padding: 9px 12px; }}
+    QToolButton#updateMenu:hover {{ border-color: {c['accent']}; }}
+    QToolButton#updateMenu:disabled {{ color: {c['sub']}; background: {c['panel']}; }}
+    QToolButton#updateMenu::menu-indicator {{ image: none; }}
     QToolButton#install {{ padding-right: 34px; }}
     QToolButton#install::menu-button {{ subcontrol-origin: padding; subcontrol-position: top right; width: 26px; border-left: 1px solid {c['border']}; }}
     QToolButton#install::menu-button:hover {{ background: {c['selection']}; border-top-right-radius: 4px; border-bottom-right-radius: 4px; }}
@@ -110,18 +116,26 @@ def stylesheet(c):
 
 
 class Model(QAbstractTableModel):
-    headers = ('名稱 / 套件 ID', '來源', '版本', '範圍 / 狀態')
+    headers = ('名稱 / 套件 ID', '來源', '版本', '範圍 / 狀態', '可用更新')
     def __init__(self):
-        super().__init__(); self.rows = []
+        super().__init__(); self.rows = []; self.updates = {}; self.checked = set(); self.checks_enabled = True
+    @staticmethod
+    def key(package): return (package.manager, package.ident, package.scope)
     def rowCount(self, parent=QModelIndex()): return len(self.rows) if not parent.isValid() else 0
     def columnCount(self, parent=QModelIndex()): return len(self.headers) if not parent.isValid() else 0
     def data(self, index, role=Qt.DisplayRole):
         if not index.isValid(): return None
         p = self.rows[index.row()]
-        if role == Qt.DisplayRole: return (p.name, p.manager, p.version, p.appimage_state or p.scope)[index.column()]
+        update=self.updates.get(self.key(p))
+        if role == Qt.DisplayRole:
+            return (p.name, p.manager, p.version, p.appimage_state or p.scope,
+                    (update.candidate if update and update.candidate != '未知' else '可更新') if update else '—')[index.column()]
+        if role == Qt.CheckStateRole and index.column() == 4 and update:
+            return Qt.Checked if self.key(p) in self.checked else Qt.Unchecked
         if role == Qt.DecorationRole and index.column() == 0 and p.icon:
             return QIcon(p.icon) if Path(p.icon).is_absolute() else QIcon.fromTheme(p.icon)
-        if role == Qt.ToolTipRole: return p.ident
+        if role == Qt.ToolTipRole:
+            return ('勾選後可批次更新；目前版本 '+update.current+'，可更新至 '+update.candidate) if index.column()==4 and update else p.ident
         if role == Qt.UserRole: return p
         return None
     def headerData(self, section, orientation, role=Qt.DisplayRole):
@@ -129,20 +143,91 @@ class Model(QAbstractTableModel):
         if orientation == Qt.Horizontal and role == Qt.ToolTipRole: return '拖曳欄位邊界調整寬度，雙擊邊界自動調整'
         return None
     def replace(self, rows):
-        self.beginResetModel(); self.rows = rows; self.endResetModel()
+        self.beginResetModel(); self.rows = rows; self.updates = {}; self.checked = set(); self.endResetModel()
+    def set_updates(self, items):
+        self.beginResetModel()
+        self.updates={self.key(item.package):item for item in items if item.package is not None}
+        self.checked.clear(); self.endResetModel()
+    def flags(self, index):
+        flags=super().flags(index)
+        if index.isValid() and index.column()==4 and self.checks_enabled and self.key(self.rows[index.row()]) in self.updates:
+            flags |= Qt.ItemIsUserCheckable
+        return flags
+    def setData(self, index, value, role=Qt.EditRole):
+        if not index.isValid() or role != Qt.CheckStateRole or index.column()!=4 or not self.checks_enabled:
+            return False
+        key=self.key(self.rows[index.row()])
+        if key not in self.updates: return False
+        if value == Qt.Checked: self.checked.add(key)
+        else: self.checked.discard(key)
+        self.dataChanged.emit(index,index,[Qt.CheckStateRole]); return True
+    def set_checks_enabled(self, enabled):
+        self.checks_enabled=enabled
+        if self.rows:
+            self.dataChanged.emit(self.index(0,4),self.index(len(self.rows)-1,4),[Qt.CheckStateRole])
 
 
 class Filter(QSortFilterProxyModel):
     def __init__(self):
-        super().__init__(); self.query = ''; self.manager = '全部來源'; self.applications_only=False; self.setSortCaseSensitivity(Qt.CaseInsensitive)
+        super().__init__(); self.query = ''; self.manager = '全部來源'; self.applications_only=False; self.updates_only=False; self.setSortCaseSensitivity(Qt.CaseInsensitive)
     def filterAcceptsRow(self, row, parent):
         p = self.sourceModel().rows[row]
-        matches = (self.manager == '全部來源' or p.manager == self.manager or
-                   (self.manager == '開發工具' and p.manager in ('pipx', 'npm global', 'Cargo')))
-        return matches and (not self.applications_only or p.is_application) and (not self.query or self.query in ' '.join((p.name, p.ident, p.description)).casefold())
+        selected=self.manager if isinstance(self.manager, set) else ({self.manager} if self.manager != '全部來源' else set())
+        matches = (not selected or p.manager in selected or
+                   ('開發工具' in selected and p.manager in ('pipx', 'npm global', 'Cargo')))
+        return matches and (not self.updates_only or self.sourceModel().key(p) in self.sourceModel().updates) and (not self.applications_only or p.is_application) and (not self.query or self.query in ' '.join((p.name, p.ident, p.description)).casefold())
     def set_query(self, query): self.query = query.strip().casefold(); self.invalidateFilter()
     def set_manager(self, manager): self.manager = manager; self.invalidateFilter()
     def set_applications_only(self, enabled): self.applications_only=enabled; self.invalidateFilter()
+    def set_updates_only(self, enabled): self.updates_only=enabled; self.invalidateFilter()
+
+
+class SourceCombo(QComboBox):
+    selectionChanged = pyqtSignal(object)
+
+    def __init__(self):
+        super().__init__()
+        self.setEditable(True); self.lineEdit().setReadOnly(True)
+        self.lineEdit().setFocusPolicy(Qt.NoFocus)
+        self.view().viewport().installEventFilter(self)
+        self.view().installEventFilter(self)
+        self.view().pressed.connect(self.toggle_index)
+        self._suppress_hide=False
+
+    def add_source(self, name):
+        self.addItem(name,name)
+        item=self.model().item(self.count()-1)
+        item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+        item.setData(Qt.Unchecked,Qt.CheckStateRole)
+
+    def selected(self):
+        return {self.itemData(i) for i in range(1,self.count()) if self.model().item(i).checkState()==Qt.Checked}
+
+    def set_selected(self, selected, notify=True):
+        for i in range(self.count()):
+            checked=(not selected) if i==0 else self.itemData(i) in selected
+            self.model().item(i).setCheckState(Qt.Checked if checked else Qt.Unchecked)
+        self.lineEdit().setText('全部來源' if not selected else '、'.join(self.itemData(i) for i in range(1,self.count()) if self.itemData(i) in selected))
+        if notify: self.selectionChanged.emit(set(selected))
+
+    def toggle_index(self, index):
+        if not index.isValid(): return
+        selected=self.selected(); name=self.itemData(index.row())
+        if index.row()==0: selected.clear()
+        elif name in selected: selected.remove(name)
+        else: selected.add(name)
+        self._suppress_hide=True; self.set_selected(selected)
+        QTimer.singleShot(0,lambda:setattr(self,'_suppress_hide',False))
+
+    def eventFilter(self, watched, event):
+        if watched is self.view() and event.type()==QEvent.KeyPress and event.key() in (Qt.Key_Space,Qt.Key_Return,Qt.Key_Enter):
+            self.toggle_index(self.view().currentIndex()); return True
+        return super().eventFilter(watched,event)
+
+    def hidePopup(self):
+        if self._suppress_hide:
+            self._suppress_hide=False; return
+        super().hidePopup()
 
 
 class FittedHeader(QHeaderView):
@@ -195,7 +280,7 @@ class FittedHeader(QHeaderView):
         self.adjusting = True
         try:
             if overflow > 0:
-                for index in (0, 2, 1):
+                for index in range(self.count()-2, -1, -1):
                     shrink = min(overflow, self.sectionSize(index) - self.minimumSectionSize())
                     if shrink > 0:
                         self.resizeSection(index, self.sectionSize(index) - shrink)
@@ -206,96 +291,6 @@ class FittedHeader(QHeaderView):
             self.resizeSection(self.count() - 1, max(self.minimumSectionSize(), self.table.viewport().width() - used))
         finally:
             self.adjusting = False
-
-
-class Worker(QObject):
-    done = pyqtSignal(object)
-    def run(self): self.done.emit(scan_all())
-
-
-class Task(QThread):
-    result_ready = pyqtSignal(object, object)
-
-    def __init__(self, fn, parent=None):
-        super().__init__(parent); self.fn = fn
-
-    def run(self):
-        try:
-            self.result_ready.emit(self.fn(), None)
-        except Exception as exc:
-            self.result_ready.emit(None, str(exc) or type(exc).__name__)
-
-
-class OperationTask(QThread):
-    output = pyqtSignal(str)
-    progress = pyqtSignal(int)
-    result_ready = pyqtSignal(object, object)
-
-    def __init__(self, operation, parent=None):
-        super().__init__(parent); self.operation = operation
-
-    def run(self):
-        try:
-            if self.operation.argv:
-                self.output.emit('$ ' + shlex.join(self.operation.argv))
-            else:
-                self.output.emit('正在複製 AppImage 並建立桌面捷徑。')
-            result = actions.execute(self.operation, self.output.emit, self.progress.emit)
-            self.result_ready.emit(result, None)
-        except Exception as exc:
-            self.result_ready.emit(None, str(exc) or type(exc).__name__)
-
-
-class BatchOperationTask(QThread):
-    output=pyqtSignal(str)
-    progress=pyqtSignal(int)
-    result_ready=pyqtSignal(int,object)
-    def __init__(self,operations,parent=None):
-        super().__init__(parent); self.operations=operations
-    def run(self):
-        failures=[]; succeeded=0; total=len(self.operations)
-        for index,operation in enumerate(self.operations):
-            self.output.emit(f'[{index+1}/{total}] {operation.package.name}（{operation.package.manager}）')
-            self.output.emit('$ '+shlex.join(operation.argv))
-            try:
-                actions.execute(operation,self.output.emit,lambda value,i=index:self.progress.emit(min(99,(i*100+value)//total)))
-                succeeded+=1; self.output.emit('已完成：'+operation.package.name)
-            except Exception as exc:
-                message=str(exc) or type(exc).__name__; failures.append((operation.package.name,message))
-                self.output.emit('未完成：'+operation.package.name+' — '+message.split('\n\n',1)[0])
-            self.progress.emit(min(99,((index+1)*100)//total))
-        self.result_ready.emit(succeeded,failures)
-
-
-class ThemeEditor(QDialog):
-    """Edit a draft palette; changes are applied only after saving."""
-    def __init__(self, colors, parent=None):
-        super().__init__(parent); self.setWindowTitle('自訂配色'); self.setMinimumWidth(440)
-        self.colors=dict(colors); self.color_buttons={}
-        layout=QVBoxLayout(self); layout.setContentsMargins(22,20,22,20); layout.setSpacing(14)
-        layout.addWidget(QLabel('選擇你喜歡的顏色組合'))
-        grid=QGridLayout(); grid.setVerticalSpacing(10)
-        for row,(key,label) in enumerate((('bg','視窗背景'),('panel','面板'),('text','文字'),('accent','重點顏色'),('output','輸出欄'))):
-            grid.addWidget(QLabel(label),row,0)
-            button=QPushButton(); button.setMinimumWidth(150)
-            button.setObjectName('color-'+key)
-            button.clicked.connect(lambda checked=False,k=key:self.pick_color(k))
-            grid.addWidget(button,row,1); self.color_buttons[key]=button
-        layout.addLayout(grid)
-        self.preview=QLabel('配色預覽     文字與輸出內容'); self.preview.setMinimumHeight(54); self.preview.setAlignment(Qt.AlignCenter); layout.addWidget(self.preview)
-        buttons=QDialogButtonBox(QDialogButtonBox.Save|QDialogButtonBox.Cancel)
-        buttons.button(QDialogButtonBox.Save).setText('儲存並套用'); buttons.button(QDialogButtonBox.Cancel).setText('取消')
-        buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject); layout.addWidget(buttons)
-        self.update_preview()
-    def pick_color(self, key):
-        selected=QColorDialog.getColor(QColor(self.colors[key]), self, '選擇顏色', options=QColorDialog.DontUseNativeDialog)
-        if selected.isValid(): self.colors[key]=selected.name(); self.update_preview()
-    def update_preview(self):
-        for key,button in self.color_buttons.items():
-            color=self.colors[key]; fg='#ffffff' if QColor(color).lightness()<128 else '#181818'
-            button.setText(color.upper()); button.setStyleSheet(f'QPushButton {{ background: {color}; color: {fg}; border: 1px solid #888888; border-radius: 5px; padding: 8px 12px; }}')
-        c=custom_palette(self.colors)
-        self.preview.setStyleSheet(f"background: {c['output']}; color: {c['text']}; border: 1px solid {c['accent']}; border-radius: 5px; padding: 8px;")
 
 
 class Window(QMainWindow):
@@ -317,13 +312,24 @@ class Window(QMainWindow):
         self.theme_name=self.settings.value('theme/selected','dark',type=str)
         if self.theme_name not in ('dark','light','custom'): self.theme_name='dark'
         self.current_colors=DARK; self.is_dark=True
-        self.results = []; self.thread = None; self.jobs = set(); self.operation_busy = False; self.manual_scan_pending = False; self.refresh_after_scan = False; self.buttons = {}
+        self.session_log=None; self.session_log_error=None
+        try:
+            self.session_log=SessionLog(); self.session_log.write('PackScope 啟動')
+        except OSError as exc:
+            self.session_log_error=str(exc)
+        self.results = []; self.thread = None; self.jobs = set(); self.operation_busy = False; self.manual_scan_pending = False; self.refresh_after_scan = False
+        self.inventory_generation=0; self.update_check_running=False; self.update_sections=[]; self.check_after_scan=False
+        self.last_operation_result=''
         self.operation_label = ''; self.operation_started_at = None; self.operation_last_output_at = None
         self.operation_idle_warning_seconds = 60; self.operation_idle_reported = False
         self.operation_timer = QTimer(self); self.operation_timer.setInterval(1000); self.operation_timer.timeout.connect(self.check_operation_activity)
         self.launch_generation = 0; self.launch_targets = []
         self.launch_timer = QTimer(self); self.launch_timer.setSingleShot(True); self.launch_timer.timeout.connect(self.discover_launchers)
+        self.search_timer = QTimer(self); self.search_timer.setSingleShot(True); self.search_timer.setInterval(150); self.search_timer.timeout.connect(self.apply_search)
+        self.update_spinner_frame=0; self.update_spinner_timer=QTimer(self); self.update_spinner_timer.setInterval(120); self.update_spinner_timer.timeout.connect(self.animate_update_spinner)
         self.build(); self.apply_theme(); self.restore_view(); self.refresh()
+        if self.session_log_error:
+            self.log_event('無法建立操作日誌：'+self.session_log_error)
     def label(self, text, name=None, wrap=False):
         l=QLabel(text); l.setTextFormat(Qt.PlainText); l.setWordWrap(wrap); l.setTextInteractionFlags(Qt.TextSelectableByMouse)
         if name: l.setObjectName(name)
@@ -340,13 +346,35 @@ class Window(QMainWindow):
         self.theme=QPushButton('☼  切換主題'); self.theme.clicked.connect(self.toggle_theme); top.addWidget(self.theme)
         self.refresh_button=QPushButton('↻  重新掃描'); self.refresh_button.clicked.connect(self.manual_refresh); top.addWidget(self.refresh_button); main.addLayout(top)
         controls=QHBoxLayout(); self.search=QLineEdit(); self.search.setPlaceholderText('搜尋名稱、套件 ID 或描述…'); self.search.setClearButtonEnabled(True); controls.addWidget(self.search,1)
-        self.app_filter=QCheckBox('僅顯示應用程式'); self.app_filter.setToolTip('預設只看辨識到的應用程式；取消勾選可查看系統套件和開發工具。辨識結果可能有遺漏。'); self.app_filter.toggled.connect(self.filter_applications); controls.addWidget(self.app_filter)
         self.count=self.label('準備掃描…','badge'); controls.addWidget(self.count); main.addLayout(controls)
         sources=QHBoxLayout(); sources.setSpacing(7); sources.addWidget(self.label('來源','caption')); sources.addSpacing(4)
+        self.source_combo=SourceCombo(); self.source_combo.setAccessibleName('來源篩選（可多選）')
         for name in ('全部來源','APT / dpkg','Snap','Flatpak','AppImage','開發工具'):
-            button=QPushButton(name); button.setObjectName('nav'); button.setCheckable(True); button.clicked.connect(lambda checked, n=name:self.select_manager(n)); sources.addWidget(button); self.buttons[name]=button
-        self.sources_help_button=QPushButton('?'); self.sources_help_button.setObjectName('help'); self.sources_help_button.setFixedSize(68,40); self.sources_help_button.setToolTip('了解各種軟體來源'); self.sources_help_button.setAccessibleName('了解軟體來源'); self.sources_help_button.clicked.connect(self.show_sources_help); sources.addWidget(self.sources_help_button)
-        self.buttons['全部來源'].setChecked(True); sources.addStretch(); main.addLayout(sources)
+            self.source_combo.add_source(name)
+        self.source_combo.set_selected(set(),notify=False)
+        self.source_combo.selectionChanged.connect(self.select_managers)
+        sources.addWidget(self.source_combo)
+        self.sources_help_button=QPushButton('?'); self.sources_help_button.setObjectName('help'); self.sources_help_button.setFixedSize(40,40); self.sources_help_button.setToolTip('了解各種軟體來源'); self.sources_help_button.setAccessibleName('了解軟體來源'); self.sources_help_button.clicked.connect(self.show_sources_help); sources.addWidget(self.sources_help_button)
+        sources.addWidget(self.label('類型','caption'))
+        self.app_filter=QComboBox(); self.app_filter.setAccessibleName('應用程式類型篩選')
+        self.app_filter.addItem('僅顯示應用程式',True); self.app_filter.addItem('顯示全部套件',False)
+        self.app_filter.setToolTip('依可用資料辨識應用程式，結果可能有遺漏。')
+        self.app_filter.currentIndexChanged.connect(lambda index:self.filter_applications(self.app_filter.itemData(index)))
+        sources.addWidget(self.app_filter)
+        sources.addStretch()
+        self.update_controls=QWidget(); update_row=QHBoxLayout(self.update_controls)
+        update_row.setContentsMargins(0,0,0,0); update_row.setSpacing(5)
+        self.update_menu_button=QToolButton(); self.update_menu_button.setObjectName('updateMenu'); self.update_menu_button.setText('更新選項')
+        self.update_menu_button.setPopupMode(QToolButton.InstantPopup)
+        update_menu=QMenu(self.update_menu_button); self.update_menu_button.setMenu(update_menu)
+        self.updates_only=update_menu.addAction('僅顯示可更新'); self.updates_only.setCheckable(True); self.updates_only.toggled.connect(self.filter_updates)
+        self.select_updates_button=update_menu.addAction('勾選目前顯示的更新'); self.select_updates_button.triggered.connect(self.select_visible_updates)
+        self.clear_updates_button=update_menu.addAction('清除勾選'); self.clear_updates_button.triggered.connect(self.clear_update_checks)
+        self.metadata_button=update_menu.addAction('重新取得套件資訊'); self.metadata_button.triggered.connect(self.refresh_metadata)
+        update_menu.addSeparator()
+        self.apply_updates_button=update_menu.addAction('更新勾選項目（0）'); self.apply_updates_button.setEnabled(False); self.apply_updates_button.triggered.connect(self.update_checked)
+        update_row.addWidget(self.update_menu_button)
+        self.update_controls.hide(); sources.addWidget(self.update_controls); main.addLayout(sources)
         vertical_splitter=QSplitter(Qt.Vertical); self.vertical_splitter=vertical_splitter; vertical_splitter.setHandleWidth(8); vertical_splitter.setChildrenCollapsible(False); main.addWidget(vertical_splitter,1)
         splitter=QSplitter(Qt.Horizontal); self.splitter=splitter; splitter.setHandleWidth(10); splitter.setChildrenCollapsible(False); vertical_splitter.addWidget(splitter)
         self.model=Model(); self.proxy=Filter(); self.proxy.setSourceModel(self.model); self.search.textChanged.connect(self.search_changed)
@@ -356,11 +384,12 @@ class Window(QMainWindow):
         self.table.horizontalHeader().setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.table.horizontalHeader().setMinimumSectionSize(55)
-        for i, width in ((0,230),(1,115),(2,165),(3,75)):
+        for i, width in ((0,230),(1,115),(2,165),(3,75),(4,100)):
             self.table.setColumnWidth(i,width)
         self.table.horizontalHeader().enable_fitting()
         self.table.sortByColumn(0, Qt.AscendingOrder)
         self.table.selectionModel().currentRowChanged.connect(self.show_detail); splitter.addWidget(self.table)
+        self.model.dataChanged.connect(self.update_selection_count)
         details=QFrame(); details.setObjectName('details')
         dl=QVBoxLayout(details); dl.setContentsMargins(20,22,20,20); dl.setSpacing(9)
         dl.addWidget(self.label('來源透視','caption')); self.detail_name=self.label('選取一個項目','section',True); dl.addWidget(self.detail_name)
@@ -371,6 +400,8 @@ class Window(QMainWindow):
         self.remove_button=QPushButton('移除'); self.remove_button.setEnabled(False); self.remove_button.clicked.connect(lambda:self.apply_selected('remove')); action_row.addWidget(self.remove_button); dl.addLayout(action_row)
         self.info_button=QPushButton('查看完整資料'); self.info_button.setEnabled(False); self.info_button.clicked.connect(self.show_more); dl.addWidget(self.info_button)
         self.history_button=QPushButton('變更紀錄'); self.history_button.setEnabled(False); self.history_button.clicked.connect(self.show_history); dl.addWidget(self.history_button)
+        dl.addWidget(self.label('更新資訊','caption'))
+        self.update_detail=self.label('尚未檢查更新。',None,True); dl.addWidget(self.update_detail)
         dl.addSpacing(8)
         self.detail_fields=[]
         for title in ('目前管理器','套件 ID','版本','安裝範圍','來源證據','檔案位置'):
@@ -386,11 +417,21 @@ class Window(QMainWindow):
         self.operation_output.setFont(QFont('monospace',9)); op_layout.addWidget(self.operation_output)
         vertical_splitter.addWidget(self.operation_panel); vertical_splitter.setStretchFactor(0,1); vertical_splitter.setStretchFactor(1,0); vertical_splitter.setSizes([600,110])
         vertical_splitter.handle(1).setToolTip('拖曳調整輸出區高度')
-        self.status=self.label('正在準備…','muted',True); main.addWidget(self.status)
+        status_row=QHBoxLayout(); self.status=self.label('正在準備…','muted',True); status_row.addWidget(self.status,1)
+        self.scan_issues_button=QPushButton('查看掃描問題'); self.scan_issues_button.setVisible(False)
+        self.scan_issues_button.setAccessibleName('查看掃描問題及重新掃描')
+        self.scan_issues_button.clicked.connect(self.show_scan_issues); status_row.addWidget(self.scan_issues_button)
+        self.log_button=QPushButton('操作日誌'); self.log_button.clicked.connect(self.show_log_location); status_row.addWidget(self.log_button)
+        main.addLayout(status_row)
     def apply_theme(self):
         self.current_colors = {'dark':DARK, 'light':LIGHT, 'custom':custom_palette(self.custom_colors)}[self.theme_name]
         self.is_dark=QColor(self.current_colors['panel']).lightness()<128
         self.setStyleSheet(stylesheet(self.current_colors))
+        c=self.current_colors
+        popup=(f"QFrame {{ background: {c['panel']}; border: 1px solid {c['border']}; }} "
+               f"QListView {{ background: {c['panel']}; color: {c['text']}; border: none; "
+               f"selection-background-color: {c['selection']}; selection-color: {c['text']}; }}")
+        for combo in (self.source_combo,self.app_filter): combo.view().window().setStyleSheet(popup)
     def set_theme(self, name, persist=True):
         if name not in ('dark','light','custom'): raise ValueError('未知主題。')
         self.theme_name=name; self.apply_theme()
@@ -426,54 +467,96 @@ class Window(QMainWindow):
             if self.edit_custom_theme(): dialog.accept()
         customize.clicked.connect(customize_theme); dialog.exec_()
     def restore_view(self):
-        self.app_filter.setChecked(self.settings.value('view/applications_only', True, type=bool))
-        source=self.settings.value('view/source', '全部來源', type=str)
-        self.select_manager(source if source in self.buttons else '全部來源')
+        self.app_filter.setCurrentIndex(0 if self.settings.value('view/applications_only', True, type=bool) else 1)
+        self.filter_applications(self.app_filter.currentData())
+        source=self.settings.value('view/sources', '', type=str)
+        try: selected=set(json.loads(source)) if source else set()
+        except (ValueError,TypeError): selected=set()
+        if not source:
+            old=self.settings.value('view/source', '全部來源', type=str)
+            selected={old} if old != '全部來源' else set()
+        selected={name for name in selected if self.source_combo.findData(name)>0}
+        self.select_managers(selected)
         self.search.setText(self.settings.value('view/query', '', type=str))
-        for key, widget in (('view/columns', self.table.horizontalHeader()),
+        for key, widget in (('view/columns_v2', self.table.horizontalHeader()),
                             ('view/panels', self.splitter),
                             ('view/output', self.vertical_splitter)):
             state=self.settings.value(key)
             if state is not None: widget.restoreState(state)
     def select_manager(self, name):
-        if name == '開發工具' and self.app_filter.isChecked():
-            self.app_filter.setChecked(False)
-        for key, button in self.buttons.items(): button.setChecked(key==name)
-        self.proxy.set_manager(name); self.settings.setValue('view/source', name)
+        self.select_managers({name} if name != '全部來源' else set())
+    def select_managers(self, selected):
+        if '開發工具' in selected and self.app_filter.currentData():
+            self.app_filter.setCurrentIndex(1)
+        self.source_combo.set_selected(selected,notify=False)
+        self.proxy.set_manager(selected if len(selected)>1 else (next(iter(selected)) if selected else '全部來源'))
+        self.settings.setValue('view/sources', json.dumps(sorted(selected),ensure_ascii=False))
         self.clear_details(); self.update_count()
     def search_changed(self, text):
-        self.proxy.set_query(text); self.settings.setValue('view/query', text)
+        self.settings.setValue('view/query', text)
+        self.clear_details()
+        if text:
+            self.table.setEnabled(False)
+            self.search_timer.start()
+        else:
+            self.search_timer.stop(); self.apply_search()
+    def apply_search(self):
+        self.search_timer.stop()
+        self.proxy.set_query(self.search.text())
+        self.table.setEnabled(True)
         self.clear_details(); self.update_count()
     def filter_applications(self, enabled):
         self.proxy.set_applications_only(enabled); self.settings.setValue('view/applications_only', enabled)
         self.clear_details(); self.update_count()
+    def filter_updates(self, enabled):
+        self.proxy.set_updates_only(enabled); self.clear_details(); self.update_count()
     def clear_details(self):
         self.table.clearSelection(); self.table.setCurrentIndex(QModelIndex()); self.show_detail(QModelIndex(), QModelIndex())
     def update_count(self):
         visible=self.proxy.rowCount()
         self.count.setText(f'顯示 {visible:,} / 全部 {len(self.model.rows):,} 項')
         matching=(p for p in self.model.rows
-                  if (not self.proxy.applications_only or p.is_application)
+                  if (not self.proxy.updates_only or self.model.key(p) in self.model.updates)
+                  and (not self.proxy.applications_only or p.is_application)
                   and (not self.proxy.query or self.proxy.query in ' '.join((p.name,p.ident,p.description)).casefold()))
-        counts={key:0 for key in self.buttons}
+        counts={self.source_combo.itemData(i):0 for i in range(self.source_combo.count())}
         for package in matching:
             counts['全部來源']+=1
             if package.manager in counts: counts[package.manager]+=1
             elif package.manager in ('pipx','npm global','Cargo'): counts['開發工具']+=1
         labels={'全部來源':'全部','APT / dpkg':'APT','Snap':'Snap','Flatpak':'Flatpak',
                 'AppImage':'AppImage','開發工具':'開發工具'}
-        for key,button in self.buttons.items():
-            button.setText(f'{labels[key]} · {counts[key]:,}')
+        for index in range(self.source_combo.count()):
+            key=self.source_combo.itemData(index)
+            self.source_combo.setItemText(index,f'{labels[key]} · {counts[key]:,}')
+        self.source_combo.set_selected(self.source_combo.selected(),notify=False)
 
     def log_event(self, message):
         self.operation_output.appendPlainText(f'[{datetime.now().strftime("%H:%M:%S")}] {message}')
+        self.write_session_log(message)
+    def write_session_log(self, message):
+        if not self.session_log: return
+        try: self.session_log.write(message)
+        except OSError as exc:
+            self.session_log=None
+            self.operation_output.appendPlainText('操作日誌寫入失敗：'+str(exc))
+            self.status.setText('操作日誌寫入失敗，請檢查磁碟空間與權限。')
+    def show_log_location(self):
+        if not self.session_log:
+            QMessageBox.warning(self,'操作日誌','無法寫入日誌；請檢查輸出區的錯誤與目錄權限。'); return
+        QMessageBox.information(self,'操作日誌',f'本次日誌：\n{self.session_log.path}\n\n其他執行紀錄在同一資料夾。日誌可能包含套件名稱、檔案路徑及工具輸出；分享前請檢查個人資訊。')
     def manual_refresh(self):
         if self.operation_busy or self.thread is not None: return
         self.manual_scan_pending=True; self.log_event('開始重新掃描軟體清單。'); self.refresh()
     def refresh(self):
         if self.operation_busy or self.thread is not None: return
+        self.inventory_generation+=1; self.update_sections=[]
+        # Update data is invalidated by a scan; keeping this filter enabled
+        # would hide every row until the next update query.
+        self.updates_only.setChecked(False)
+        self.model.set_updates([]); self.update_selection_count()
         self.refresh_button.setEnabled(False); self.status.setText('正在背景掃描本機資料，請稍候…')
-        self.thread=QThread(self); self.worker=Worker(); self.worker.moveToThread(self.thread)
+        self.thread=QThread(self); self.worker=Worker(scan_all); self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run); self.worker.done.connect(self.scan_done); self.worker.done.connect(self.thread.quit)
         self.thread.finished.connect(self.worker.deleteLater); self.thread.finished.connect(self.thread.deleteLater)
         self.thread.finished.connect(self.scan_finished); self.thread.start()
@@ -481,22 +564,43 @@ class Window(QMainWindow):
         self.thread=None; self.refresh_button.setEnabled(not self.operation_busy)
         if self.refresh_after_scan and not self.operation_busy:
             self.refresh_after_scan=False; self.refresh()
+        elif self.check_after_scan and not self.operation_busy:
+            self.check_after_scan=False; self.check_updates()
     def scan_done(self, results):
+        self.inventory_generation+=1; self.update_sections=[]
         self.results=results; rows=sorted((p for r in results for p in r.packages), key=lambda p:p.name.casefold())
-        self.model.replace(rows); self.update_count(); self.show_detail(QModelIndex(),QModelIndex())
+        self.model.replace(rows); self.update_selection_count(); self.update_count(); self.show_detail(QModelIndex(),QModelIndex())
         parts=[]
         for result in results:
             state=f'{len(result.packages):,}' if result.status=='ok' else ('未安裝' if result.status=='unavailable' else '讀取失敗')
             parts.append(f'{result.manager} {state}')
-        self.status.setText('  ·  '.join(parts) + '    |    '+datetime.now().strftime('%H:%M')+' 掃描完成')
+        scan_status='  ·  '.join(parts) + '    |    '+datetime.now().strftime('%H:%M')+' 掃描完成'
+        self.status.setText((self.last_operation_result+'  |  ' if self.last_operation_result else '')+scan_status)
         if self.manual_scan_pending:
             self.log_event('重新掃描完成：' + '；'.join(parts)); self.manual_scan_pending=False
         self.status.setToolTip('\n'.join(f'{r.manager}：{r.detail or "讀取成功"}' for r in results))
+        failures=[r for r in results if r.status == 'error']
+        self.scan_issues_button.setVisible(bool(failures))
+        self.scan_issues_button.setText(f'查看掃描問題（{len(failures)}）')
         developer_info=[]
         for r in results:
-            if r.manager in self.buttons: self.buttons[r.manager].setToolTip(r.detail or '讀取成功')
+            index=self.source_combo.findData(r.manager)
+            if index>=0: self.source_combo.setItemData(index,r.detail or '讀取成功',Qt.ToolTipRole)
             elif r.manager in ('pipx', 'npm global', 'Cargo'): developer_info.append(f'{r.manager}：{r.detail or "讀取成功"}')
-        self.buttons['開發工具'].setToolTip('\n'.join(developer_info))
+        self.source_combo.setItemData(self.source_combo.findData('開發工具'),'\n'.join(developer_info),Qt.ToolTipRole)
+    def show_scan_issues(self):
+        failures=[r for r in self.results if r.status == 'error']
+        if not failures: return
+        dialog=QDialog(self); dialog.setWindowTitle('掃描問題'); dialog.resize(650,360)
+        layout=QVBoxLayout(dialog)
+        layout.addWidget(self.label('以下來源讀取失敗，其他來源仍可使用。請檢查權限或套件管理器狀態後重試。',wrap=True))
+        details=QPlainTextEdit(); details.setReadOnly(True)
+        details.setPlainText('\n\n'.join(f'{r.manager}\n{r.detail}' for r in failures)); layout.addWidget(details)
+        buttons=QDialogButtonBox(QDialogButtonBox.Close)
+        retry=buttons.addButton('重新掃描',QDialogButtonBox.ActionRole)
+        retry.setEnabled(not self.operation_busy and self.thread is None)
+        retry.clicked.connect(lambda: (dialog.accept(), self.manual_refresh()))
+        buttons.rejected.connect(dialog.reject); layout.addWidget(buttons); dialog.exec_()
     def show_detail(self, current, previous):
         self.launch_generation += 1; self.launch_timer.stop(); self.launch_targets = []
         self.open_button.setEnabled(False); self.open_button.setText('開啟')
@@ -505,6 +609,7 @@ class Window(QMainWindow):
             self.open_button.setToolTip('請先選擇軟體。')
             self.info_button.setEnabled(False); self.history_button.setEnabled(False); self.install_update_button.setEnabled(False); self.remove_button.setEnabled(False)
             for field in self.detail_fields: field.setText('—')
+            self.update_detail.setText('選取項目以查看更新資訊。' if self.update_sections else '尚未檢查更新。')
             return
         p=self.proxy.data(self.proxy.index(current.row(),0),Qt.UserRole)
         if p is None: return
@@ -513,6 +618,13 @@ class Window(QMainWindow):
         self.install_update_button.setEnabled(not self.operation_busy and p.manager in ('APT / dpkg','Snap','Flatpak','pipx','npm global','Cargo'))
         self.remove_button.setEnabled(not self.operation_busy and p.manager in ('APT / dpkg','Snap','Flatpak','pipx','npm global','Cargo','AppImage'))
         for field, value in zip(self.detail_fields,(p.manager,p.ident,p.version,p.scope,p.evidence,p.location or '未知')): field.setText(value)
+        item=self.model.updates.get(self.model.key(p))
+        if item:
+            self.update_detail.setText(f'目前版本：{item.current}\n可更新版本：{item.candidate}\n來源：{p.manager}（{p.scope}）\n\n目前未取得此版本的更新日誌。')
+        elif self.update_sections:
+            section=next((s for s in self.update_sections if s[0] == (f'Flatpak / {p.scope}' if p.manager=='Flatpak' else ('開發工具' if p.manager in ('pipx','npm global','Cargo') else p.manager))),None)
+            self.update_detail.setText(('查詢失敗：'+str(section[3])) if section and section[3] else ((section[1]+'\n目前沒有對應的可更新項目。') if section else '此來源尚未檢查。'))
+        else: self.update_detail.setText('尚未檢查更新。')
         self.open_button.setToolTip('正在查詢可用的啟動方式…'); self.launch_timer.start(180)
     def selected_package(self):
         current=self.table.currentIndex()
@@ -537,6 +649,7 @@ class Window(QMainWindow):
             self.status.setText(f'仍在{self.operation_label}；已收到新輸出。')
             self.operation_idle_reported=False
         self.operation_output.appendPlainText(line)
+        self.write_session_log(line)
     def check_operation_activity(self):
         if self.operation_last_output_at is None:
             return
@@ -550,7 +663,10 @@ class Window(QMainWindow):
         self.status.setText(message); self.log_event(message)
     def set_operation_busy(self, busy):
         self.operation_busy=busy
-        self.install_button.setEnabled(not busy); self.update_button.setEnabled(not busy); self.refresh_button.setEnabled(not busy)
+        self.install_button.setEnabled(not busy); self.update_button.setEnabled(not busy and not self.update_check_running); self.refresh_button.setEnabled(not busy)
+        self.model.set_checks_enabled(not busy and not self.update_check_running)
+        self.metadata_button.setEnabled(not busy and not self.update_check_running)
+        self.update_selection_count()
         if busy:
             self.open_button.setEnabled(False); self.remove_button.setEnabled(False); self.install_update_button.setEnabled(False)
         else:
@@ -755,6 +871,7 @@ class Window(QMainWindow):
     def start_operation(self, operation, label=None):
         package=operation.package; action=operation.action
         label=label or {'install':'安裝','update':'更新','remove':'移除'}[action]
+        self.last_operation_result=''
         self.set_operation_busy(True)
         self.status.setText(f'正在{label} {package.name}，請留意系統授權視窗…')
         self.operation_bar.setRange(0,0); self.operation_bar.show()
@@ -767,9 +884,12 @@ class Window(QMainWindow):
             if error:
                 if self.operation_bar.maximum() == 0: self.operation_bar.setRange(0,100); self.operation_bar.setValue(0)
                 self.log_event(f'{label}未完成：' + error.split('\n\n',1)[0])
+                self.write_session_log(error)
+                self.last_operation_result=f'{label}未完成：{package.name}（{package.manager}）'
             else:
                 self.operation_bar.setRange(0,100); self.operation_bar.setValue(100)
                 self.log_event(f'{label}完成：{package.name}')
+                self.last_operation_result=f'{label}完成：{package.name}（{package.manager}）'
                 if action == 'install' and package.location:
                     self.search.clear(); self.select_manager(package.manager)
             if self.thread is not None: self.refresh_after_scan=True
@@ -789,14 +909,23 @@ class Window(QMainWindow):
             else: self.text_dialog(f'{package.name} — 變更紀錄',result)
         self.run_task(lambda:backend.package_history(package),done)
     def check_updates(self):
-        if self.operation_busy: return
+        if self.operation_busy or self.update_check_running: return
+        self.update_controls.show()
+        self.update_check_running=True; generation=self.inventory_generation
+        self.update_sections=[]; self.model.set_updates([]); self.update_count()
+        self.model.set_checks_enabled(False); self.metadata_button.setEnabled(False); self.update_selection_count()
+        self.update_spinner_frame=0; self.animate_update_spinner(); self.update_spinner_timer.start()
         self.update_button.setEnabled(False); self.status.setText('正在查詢更新；Snap 可能需要連線，請稍候…')
         self.log_event('開始查詢更新。')
         def done(result,error):
-            self.update_button.setEnabled(True)
+            self.update_spinner_timer.stop(); self.update_button.setText('檢查更新')
+            self.update_check_running=False; self.update_button.setEnabled(not self.operation_busy)
+            self.model.set_checks_enabled(not self.operation_busy); self.metadata_button.setEnabled(not self.operation_busy); self.update_selection_count()
+            if generation != self.inventory_generation or self.thread is not None or self.operation_busy:
+                self.status.setText('套件清單已變更，請重新檢查更新。'); return
             if error:
                 self.log_event(f'更新查詢失敗：{error}')
-                self.status.setText('更新查詢失敗。'); QMessageBox.warning(self,'無法查詢更新',error); return
+                self.status.setText('更新查詢失敗：'+error); return
             self.status.setText('更新查詢完成；未安裝或修改軟體。')
             summary=[]
             for name,note,entries,problem in result:
@@ -805,51 +934,48 @@ class Window(QMainWindow):
             self.log_event('更新查詢完成：' + '；'.join(summary))
             self.show_updates(result)
         self.run_task(backend.check_updates,done)
+    def animate_update_spinner(self):
+        frames=('◐','◓','◑','◒')
+        self.update_button.setText(f'{frames[self.update_spinner_frame % len(frames)]} 檢查中…')
+        self.update_spinner_frame+=1
     def show_updates(self, sections):
         items=backend.update_items(sections,self.model.rows)
-        dialog=QDialog(self); dialog.setWindowTitle('可用更新'); dialog.resize(850,520)
-        layout=QVBoxLayout(dialog); layout.setContentsMargins(20,20,20,20)
-        layout.addWidget(self.label('選擇要更新的項目','section'))
-        table=QTableWidget(len(items),5); table.setHorizontalHeaderLabels(('選取','名稱','來源 / 範圍','目前版本','可更新版本'))
-        table.setEditTriggers(QAbstractItemView.NoEditTriggers); table.setSelectionBehavior(QAbstractItemView.SelectRows); table.verticalHeader().hide()
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents); table.horizontalHeader().setSectionResizeMode(1,QHeaderView.Stretch)
-        for row,item in enumerate(items):
-            check=QTableWidgetItem(); check.setFlags(Qt.ItemIsEnabled|Qt.ItemIsUserCheckable if item.package else Qt.NoItemFlags)
-            check.setCheckState(Qt.Unchecked); check.setData(Qt.UserRole,row); table.setItem(row,0,check)
-            source=item.manager+((' · '+item.package.scope) if item.package and item.manager=='Flatpak' else '')
-            for col,value in enumerate((item.name,source,item.current,item.candidate),1): table.setItem(row,col,QTableWidgetItem(value))
-            if not item.package:
-                for col in range(5): table.item(row,col).setToolTip('目前清單找不到對應項目，請重新掃描。')
-        layout.addWidget(table,1)
-        notes=[]
-        for name,note,entries,error in sections:
-            if error: notes.append(f'{name}：查詢失敗（{error.splitlines()[0]}）')
-            elif '尚未檢查' in note: notes.append(f'{name}：尚未檢查')
-            elif name=='APT / dpkg' or name.startswith('Flatpak'): notes.append(f'{name}：使用本機資料')
-        layout.addWidget(self.label('  ·  '.join(notes),'muted',True))
-        row=QHBoxLayout(); all_button=QPushButton('全選'); row.addWidget(all_button)
-        refresh=QPushButton('重新取得套件資訊'); row.addWidget(refresh); row.addStretch()
-        update=QPushButton('更新選取項目'); row.addWidget(update); close=QPushButton('關閉'); close.clicked.connect(dialog.reject); row.addWidget(close); layout.addLayout(row)
-        all_button.clicked.connect(lambda: [table.item(i,0).setCheckState(Qt.Checked) for i,item in enumerate(items) if item.package])
-        def refresh_metadata():
-            dialog.accept(); self.refresh_metadata()
-        refresh.clicked.connect(refresh_metadata)
-        def update_selected():
-            if self.operation_busy: QMessageBox.information(dialog,'更新軟體','目前有其他作業進行中，請稍候。'); return
-            chosen=[item.package for i,item in enumerate(items) if item.package and table.item(i,0).checkState()==Qt.Checked]
-            if not chosen: QMessageBox.information(dialog,'更新軟體','請先選擇要更新的項目。'); return
-            installed={(p.manager,p.ident,p.scope) for p in self.model.rows}
-            if any((p.manager,p.ident,p.scope) not in installed for p in chosen):
-                QMessageBox.warning(dialog,'清單已變更','部分項目已不在目前清單中，請重新檢查更新。'); return
-            try: operations=[actions.make_operation(p,'update') for p in chosen]
-            except ValueError as error: QMessageBox.warning(dialog,'無法更新',str(error)); return
-            detail='\n'.join(f'{p.name}（{p.manager}）' for p in chosen)
-            if any(op.package.manager == 'APT / dpkg' for op in operations):
-                dialog.accept(); self.prepare_batch_preview(operations,'更新軟體'); return
-            dialog.accept()
-            preview=actions.OperationPreview(False,warning='Snap 與 Flatpak 目前沒有納入安全的變更模擬。')
-            self.confirm_batch_operations(operations,'更新軟體',preview)
-        update.clicked.connect(update_selected); dialog.exec_()
+        self.update_sections=sections
+        self.model.set_updates(items); self.update_selection_count(); self.update_count()
+        unmatched=sum(item.package is None for item in items)
+        failures=[f'{name}：{error}' for name,note,entries,error in sections if error]
+        summary=f'找到 {len(self.model.updates)} 個可勾選更新'
+        if unmatched: summary+=f'；{unmatched} 項無法對應本機清單，請重新掃描'
+        if failures: summary+='；部分來源查詢失敗：'+'；'.join(failures)
+        self.status.setText(summary+'。請在表格勾選；篩選條件可能隱藏部分項目。')
+        self.status.setToolTip('\n'.join(f'{name}：{error or note}' for name,note,entries,error in sections))
+        self.show_detail(QModelIndex(),QModelIndex())
+    def update_selection_count(self, *args):
+        count=len(self.model.checked); allowed=not self.operation_busy and not self.update_check_running
+        self.apply_updates_button.setText(f'更新勾選項目（{count}）')
+        self.update_menu_button.setText(f'更新選項（{count}）')
+        self.apply_updates_button.setEnabled(bool(count) and allowed)
+        self.select_updates_button.setEnabled(bool(self.model.updates) and allowed)
+        self.clear_updates_button.setEnabled(bool(count) and allowed)
+    def select_visible_updates(self):
+        if self.operation_busy or self.update_check_running: return
+        for row in range(self.proxy.rowCount()):
+            index=self.proxy.index(row,4)
+            if index.flags() & Qt.ItemIsUserCheckable: self.proxy.setData(index,Qt.Checked,Qt.CheckStateRole)
+    def clear_update_checks(self):
+        if self.operation_busy or self.update_check_running: return
+        for row,p in enumerate(self.model.rows):
+            if self.model.key(p) in self.model.checked: self.model.setData(self.model.index(row,4),Qt.Unchecked,Qt.CheckStateRole)
+    def update_checked(self):
+        if self.operation_busy or self.update_check_running: return
+        chosen=[p for p in self.model.rows if self.model.key(p) in self.model.checked and self.model.key(p) in self.model.updates]
+        if not chosen: return
+        try: operations=[actions.make_operation(p,'update') for p in chosen]
+        except ValueError as error: QMessageBox.warning(self,'無法更新',str(error)); return
+        if any(op.package.manager == 'APT / dpkg' for op in operations):
+            self.prepare_batch_preview(operations,'更新軟體'); return
+        preview=actions.OperationPreview(False,warning='其他來源目前沒有納入安全的變更模擬。')
+        self.confirm_batch_operations(operations,'更新軟體',preview)
     def prepare_batch_preview(self, operations, label):
         self.set_operation_busy(True)
         self.status.setText('正在模擬所選 APT 更新…')
@@ -892,6 +1018,7 @@ class Window(QMainWindow):
         self.run_batch(operations,'重新取得套件資訊',check_after=True)
     def run_batch(self, operations, label, check_after=False):
         if self.operation_busy or not operations: return
+        self.last_operation_result=''
         self.set_operation_busy(True)
         self.status.setText(f'正在{label}…'); self.operation_bar.setRange(0,0); self.operation_bar.show(); self.log_event(f'開始{label}。')
         self.start_operation_monitor(label)
@@ -899,14 +1026,16 @@ class Window(QMainWindow):
             self.stop_operation_monitor(); self.set_operation_busy(False)
             self.operation_bar.setRange(0,100); self.operation_bar.setValue(100 if not failures else 0)
             result=f'{label}完成：成功 {succeeded} 項，失敗 {len(failures)} 項。'
+            self.last_operation_result=result
             self.status.setText(result); self.log_event(result)
             if failures: QMessageBox.warning(self,f'{label}未完全完成',result+'\n\n'+'\n'.join(f'{name}：{error.splitlines()[0]}' for name,error in failures))
+            if check_after: self.check_after_scan=True
             if self.thread is not None: self.refresh_after_scan=True
             else: self.refresh_after_scan=False; self.refresh()
-            if check_after: self.check_updates()
         task=BatchOperationTask(operations,self); self.jobs.add(task); task.output.connect(self.operation_output_received); task.progress.connect(self.operation_progress)
         task.result_ready.connect(done); task.finished.connect(lambda:self.jobs.discard(task)); task.finished.connect(task.deleteLater); task.start()
     def export_list(self):
+        if self.search_timer.isActive(): self.apply_search()
         path,chosen=QFileDialog.getSaveFileName(self,'匯出目前顯示的清單','packscope.json','JSON (*.json);;CSV (*.csv);;Markdown (*.md)')
         if not path: return
         fmt='csv' if chosen.startswith('CSV') else ('md' if chosen.startswith('Markdown') else 'json')
@@ -932,7 +1061,9 @@ class Window(QMainWindow):
                 self.status.setText('背景查詢仍在執行，請稍候再關閉。')
             self.log_event('關閉要求已延後：'+message)
         else:
-            self.settings.setValue('view/columns', self.table.horizontalHeader().saveState())
+            if self.session_log:
+                self.write_session_log('PackScope 結束'); self.session_log.close(); self.session_log=None
+            self.settings.setValue('view/columns_v2', self.table.horizontalHeader().saveState())
             self.settings.setValue('view/panels', self.splitter.saveState())
             self.settings.setValue('view/output', self.vertical_splitter.saveState())
             self.settings.sync()

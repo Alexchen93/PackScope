@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -86,7 +87,7 @@ class ImprovementTests(unittest.TestCase):
         self.assertEqual(ops[1].argv,('/usr/bin/flatpak','update','--user','--appstream','-y'))
         self.assertEqual(ops[2].argv,('/usr/bin/flatpak','update','--system','--appstream','-y'))
 
-    def test_update_dialog_selects_only_checked_and_batch_continues_after_error(self):
+    def test_inline_updates_select_checked_and_batch_continues_after_error(self):
         first=Package('First','first','1','APT / dpkg','系統')
         second=Package('Second','second','1','APT / dpkg','系統')
         sections=[('APT / dpkg','local',['first  1 → 2','second  1 → 2'],None)]
@@ -104,15 +105,112 @@ class ImprovementTests(unittest.TestCase):
             w=Window(self.settings); w.show()
             try:
                 self.wait_for(lambda:w.thread is None)
-                def choose():
-                    d=self.app.activeModalWidget(); table=d.findChild(QTableWidget)
-                    table.item(0,0).setCheckState(Qt.Checked); table.item(1,0).setCheckState(Qt.Checked)
-                    next(b for b in d.findChildren(QPushButton) if b.text()=='更新選取項目').click()
-                QTimer.singleShot(0,choose); w.show_updates(sections)
+                w.app_filter.setCurrentIndex(1)
+                w.show_updates(sections)
+                self.assertEqual(w.proxy.rowCount(),2)
+                for row in range(2):
+                    self.assertTrue(w.proxy.setData(w.proxy.index(row,4),Qt.Checked,Qt.CheckStateRole))
+                self.assertIn('2',w.apply_updates_button.text())
+                w.apply_updates_button.trigger()
                 self.wait_for(lambda:not w.operation_busy and not w.jobs and w.thread is None)
                 self.assertEqual(seen,['first','second'])
                 self.assertIn('失敗 1 項',w.operation_output.toPlainText())
+                self.assertIn('失敗 1 項',w.status.text())
             finally:
                 self.wait_for(lambda:not w.jobs and w.thread is None); w.close(); self.app.processEvents()
+
+    def test_inline_update_details_filters_and_hidden_selections(self):
+        apt=Package('Editor','editor','1','APT / dpkg','系統',is_application=True)
+        snap=Package('Editor','editor','3','Snap','系統',is_application=True)
+        other=Package('Other','other','1','Snap','系統',is_application=True)
+        sections=[('APT / dpkg','本機資料',['editor  1 → 2'],None),
+                  ('Snap','',['editor 4 10 size publisher -'],'offline'),
+                  ('AppImage','尚未檢查',[],None)]
+        with patch('packscope.app.scan_all',return_value=[ScanResult('sources',[apt,snap,other],'ok')]), \
+             patch('packscope.backend.check_updates',return_value=sections), \
+             patch.object(QMessageBox,'warning') as warning:
+            w=Window(self.settings); w.show()
+            try:
+                self.wait_for(lambda:w.thread is None)
+                self.assertFalse(w.update_controls.isVisible())
+                w.check_updates(); self.wait_for(lambda:not w.jobs)
+                self.assertTrue(w.update_controls.isVisible())
+                self.assertEqual(w.update_controls.parentWidget(),w.sources_help_button.parentWidget())
+                warning.assert_not_called()
+                self.assertIn('部分來源查詢失敗',w.status.text())
+                self.assertEqual(len(w.model.updates),1)
+                w.updates_only.setChecked(True)
+                self.assertEqual(w.proxy.rowCount(),1)
+                self.assertEqual(w.proxy.index(0,4).data(),'2')
+                w.table.selectRow(0); self.app.processEvents()
+                self.assertIn('目前版本：1',w.update_detail.text())
+                self.assertIn('可更新版本：2',w.update_detail.text())
+                self.assertIn('未取得',w.update_detail.text())
+                w.select_visible_updates()
+                self.assertEqual(len(w.model.checked),1)
+                w.select_manager('Snap')
+                self.assertEqual(w.proxy.rowCount(),0)
+                self.assertIn('1',w.apply_updates_button.text())
+                w.clear_update_checks(); self.assertFalse(w.model.checked)
+            finally:
+                self.wait_for(lambda:not w.jobs and w.thread is None); w.close(); self.app.processEvents()
+
+    def test_new_scan_invalidates_checked_updates(self):
+        item=Package('Editor','editor','1','APT / dpkg','系統',is_application=True)
+        with patch('packscope.app.scan_all',return_value=[ScanResult('APT / dpkg',[item],'ok')]):
+            w=Window(self.settings); w.show()
+            try:
+                self.wait_for(lambda:w.thread is None)
+                w.show_updates([('APT / dpkg','',['editor  1 → 2'],None)])
+                w.updates_only.setChecked(True)
+                w.select_visible_updates(); self.assertEqual(len(w.model.checked),1)
+                w.manual_refresh(); self.wait_for(lambda:w.thread is None)
+                self.assertFalse(w.model.checked)
+                self.assertFalse(w.model.updates)
+                self.assertFalse(w.apply_updates_button.isEnabled())
+                self.assertFalse(w.updates_only.isChecked())
+                self.assertEqual(w.proxy.rowCount(),1)
+            finally:
+                self.wait_for(lambda:not w.jobs and w.thread is None); w.close(); self.app.processEvents()
+
+    def test_single_update_result_survives_automatic_refresh(self):
+        item=Package('Store','snap-store','1','Snap','系統',is_application=True)
+        with patch('packscope.app.scan_all',return_value=[ScanResult('Snap',[item],'ok')]), \
+             patch('packscope.actions.shutil.which',side_effect=lambda name:'/usr/bin/'+name), \
+             patch('packscope.actions.execute',return_value='ok'), \
+             patch.object(QMessageBox,'exec_',return_value=QMessageBox.Yes):
+            w=Window(self.settings); w.show()
+            try:
+                self.wait_for(lambda:w.thread is None)
+                w.show_updates([('Snap','',['snap-store 2 rev size publisher -'],None)])
+                w.updates_only.setChecked(True)
+                w.perform_operation(item,'update')
+                self.wait_for(lambda:not w.operation_busy and not w.jobs and w.thread is None)
+                self.assertFalse(w.updates_only.isChecked())
+                self.assertEqual(w.proxy.rowCount(),1)
+                self.assertIn('更新完成：Store',w.status.text())
+                self.assertIn('掃描完成',w.status.text())
+            finally:
+                self.wait_for(lambda:not w.jobs and w.thread is None); w.close(); self.app.processEvents()
+
+    def test_update_check_displays_spinner_and_restores_button(self):
+        entered=threading.Event(); release=threading.Event()
+        def check():
+            entered.set(); release.wait(3); return []
+        with patch('packscope.app.scan_all',return_value=[]), patch('packscope.backend.check_updates',side_effect=check):
+            w=Window(self.settings); w.show()
+            try:
+                self.wait_for(lambda:w.thread is None)
+                w.check_updates(); self.wait_for(entered.is_set)
+                self.assertFalse(w.update_button.isEnabled())
+                self.assertIn('檢查中',w.update_button.text())
+                first=w.update_button.text(); w.animate_update_spinner()
+                self.assertNotEqual(first,w.update_button.text())
+                self.assertTrue(w.update_spinner_timer.isActive())
+                release.set(); self.wait_for(lambda:not w.jobs)
+                self.assertEqual(w.update_button.text(),'檢查更新')
+                self.assertFalse(w.update_spinner_timer.isActive())
+            finally:
+                release.set(); self.wait_for(lambda:not w.jobs and w.thread is None); w.close(); self.app.processEvents()
 
 if __name__=='__main__': unittest.main()

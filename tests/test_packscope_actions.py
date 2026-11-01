@@ -124,7 +124,8 @@ class ActionTests(unittest.TestCase):
         run.return_value=Process(['authentication cancelled\n'],126)
         with self.assertRaisesRegex(RuntimeError,'authentication cancelled'): actions.execute(op)
 
-    def test_streams_output_before_process_finishes_and_parses_real_progress(self):
+    @patch('packscope.actions.check_dpkg_health')
+    def test_streams_output_before_process_finishes_and_parses_real_progress(self, health):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp); script=root/'fixture.py'; release=root/'release'
             script.write_text('#!/usr/bin/env python3\nimport pathlib,sys,time\n'
@@ -145,6 +146,22 @@ class ActionTests(unittest.TestCase):
             self.assertEqual(progress,[25,99])
             self.assertIn('done',result[0])
             self.assertIsNone(actions.progress_value('installed version 1.2.3','APT / dpkg'))
+
+    @patch('packscope.actions.subprocess.run')
+    @patch('packscope.actions.shutil.which',return_value='/usr/bin/dpkg-query')
+    def test_dpkg_preflight_blocks_incomplete_packages(self, which, run):
+        run.return_value=subprocess.CompletedProcess([],0,stdout='google-chrome-stable\thalf-configured\nlauncher\tinstalled\n',stderr='')
+        with self.assertRaisesRegex(RuntimeError,'google-chrome-stable.*half-configured'):
+            actions.check_dpkg_health()
+        run.return_value=subprocess.CompletedProcess([],0,stdout='launcher\tinstalled\n',stderr='')
+        actions.check_dpkg_health()
+
+    @patch('packscope.actions.subprocess.Popen')
+    @patch('packscope.actions.check_dpkg_health',side_effect=RuntimeError('dpkg 問題'))
+    def test_apt_does_not_start_when_dpkg_is_unhealthy(self, health, popen):
+        op=actions.Operation('update',package('APT / dpkg','example'),('/usr/bin/apt-get',),True)
+        with self.assertRaisesRegex(RuntimeError,'dpkg 問題'): actions.execute(op)
+        popen.assert_not_called()
 
     @patch('packscope.actions.subprocess.run')
     @patch('packscope.actions.shutil.which',return_value='/usr/bin/apt-cache')

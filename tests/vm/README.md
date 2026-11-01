@@ -5,3 +5,5 @@
 2026-10-31 使用 Ubuntu minimal cloud image SHA-256 `3839f148c5a3b4a736e7dbb0af75594743fa5ebee2a202424ba1a32e5d3b5d2c`，QEMU `-snapshot` 和 `-nic user,restrict=on` 進行；未對外連線，也未在主機進行套件變更。這不是 PackScope 圖形介面或 polkit 授權的端到端測試。
 
 原生桌面授權、預覽確認及關閉行為的驗收步驟見 [`desktop-checklist.md`](desktop-checklist.md)。執行前請使用可還原的 Ubuntu Desktop VM，並以一般桌面使用者測試；目前清單尚未代表已完成驗證。
+
+發行前的版本、產物與桌面驗證步驟見 [`release-checklist.md`](release-checklist.md)。
