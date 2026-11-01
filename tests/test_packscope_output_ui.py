@@ -109,6 +109,7 @@ class OutputUITests(unittest.TestCase):
             w=Window(); w.show()
             try:
                 self.wait_for(lambda:w.thread is None)
+                w.set_theme('dark',persist=False)
                 for dark in (True,False):
                     if not dark: w.set_theme('light',persist=False)
                     def accept_snap():
@@ -163,7 +164,7 @@ class OutputUITests(unittest.TestCase):
                 history=w.operation_output.toPlainText()
                 self.assertIn('重新掃描完成',history)
                 self.assertIn('fixture output first',history)
-                w.text_dialog=lambda title,text:None
+                w.show_updates=lambda result:None
                 with patch('packscope.backend.check_updates',return_value=[('APT / dpkg','', ['example'],None),('AppImage','尚未檢查',[],None)]):
                     w.check_updates(); self.wait_for(lambda:not w.jobs)
                 history=w.operation_output.toPlainText()

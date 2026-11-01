@@ -1,8 +1,8 @@
-# PackScope 0.1.0
+# PackScope 0.2.0 開發版
 
 PackScope 是基於 [bauh](https://github.com/vinifmor/bauh) 修改的 Ubuntu 軟體管理介面。此專案保留 bauh 原始程式與授權，並提供新的繁體中文介面。
 
-可查看、搜尋及管理 APT、Snap、Flatpak、AppImage 與部分開發工具；支援本機安裝檔、個別更新與移除，並顯示作業輸出。
+可查看、搜尋及管理 APT、Snap、Flatpak、AppImage 與部分開發工具；支援本機安裝檔、個別與批次更新、移除，以及作業輸出。
 
 ## 啟動與使用
 
@@ -13,6 +13,8 @@ PackScope 是基於 [bauh](https://github.com/vinifmor/bauh) 修改的 Ubuntu �
 ```
 
 各來源需要相應的系統套件管理器。完整操作方式、支援範圍與限制請參考 [PackScope 使用說明](packscope/README.md)及[操作與驗證說明](packscope/SAFETY.md)。
+
+在 Ubuntu 上可執行 `sh packaging/build-deb.sh` 建立 DEB 安裝檔，輸出至 `dist/`；安裝後可從應用程式選單啟動。
 
 ## 上游與授權
 

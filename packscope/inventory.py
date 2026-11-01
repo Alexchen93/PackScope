@@ -1,9 +1,13 @@
 """Read-only inventory. No installation, privilege escalation or updates."""
 from dataclasses import dataclass
+from dataclasses import replace
+import configparser
 import glob
+import hashlib
 import json
 import logging
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -20,6 +24,9 @@ class Package:
     description: str = ""
     evidence: str = ""
     location: str = ""
+    is_application: bool = False
+    icon: str = ""
+    appimage_state: str = ""
 
 
 @dataclass
@@ -36,6 +43,33 @@ def command(args, timeout=15):
                           timeout=timeout, env=env)
 
 
+def desktop_metadata(path):
+    """Read a visible desktop entry without executing it."""
+    try:
+        parser=configparser.ConfigParser(interpolation=None,strict=False)
+        parser.read(path,encoding='utf-8')
+        entry=parser['Desktop Entry']
+        if entry.get('Type') != 'Application' or entry.getboolean('Hidden',fallback=False) or entry.getboolean('NoDisplay',fallback=False): return None
+        return (entry.get('Name[zh_TW]') or entry.get('Name[zh]') or entry.get('Name') or '',entry.get('Icon',''))
+    except (OSError,ValueError,KeyError,configparser.Error): return None
+
+
+def debian_desktop_entries(info_dir=Path('/var/lib/dpkg/info')):
+    entries={}
+    for listing in info_dir.glob('*.list'):
+        try:
+            with listing.open(encoding='utf-8',errors='replace') as source:
+                for line in source:
+                    path=line.strip()
+                    if '/applications/' not in path or not path.endswith('.desktop'): continue
+                    metadata=desktop_metadata(path)
+                    if metadata:
+                        entries.setdefault(listing.name[:-5],metadata)
+                        break
+        except OSError: continue
+    return entries
+
+
 def debian():
     if not shutil.which("dpkg-query"):
         return ScanResult("APT / dpkg", [], "unavailable", "找不到 dpkg-query")
@@ -46,6 +80,8 @@ def debian():
         rows = [Package(p.name, p.name, p.version or "未知", "APT / dpkg", "系統",
                         p.description or "", "bauh 的 Debian 模組 / aptitude 套件資料庫")
                 for p in packages]
+        entries=debian_desktop_entries()
+        rows=[replace(p,name=entries.get(p.ident,('', ''))[0] or p.name,is_application=p.ident in entries,icon=entries.get(p.ident,('', ''))[1]) for p in rows]
         return ScanResult("APT / dpkg", rows, "ok", "使用 bauh 的 aptitude 介面")
     result = command(["dpkg-query", "-W", "-f=${db:Status-Status}\t${binary:Package}\t${Version}\t${binary:Summary}\n"])
     rows = []
@@ -55,6 +91,8 @@ def debian():
             _, name, version, desc = fields
             rows.append(Package(name, name, version or "未知", "APT / dpkg", "系統", desc,
                                 "dpkg 套件資料庫（目前管理狀態）"))
+    entries=debian_desktop_entries()
+    rows=[replace(p,name=entries.get(p.ident,('', ''))[0] or p.name,is_application=p.ident in entries,icon=entries.get(p.ident,('', ''))[1]) for p in rows]
     return ScanResult("APT / dpkg", rows, "ok", "aptitude 未安裝；使用 dpkg 唯讀備援")
 
 
@@ -76,7 +114,8 @@ def flatpak():
         kind = "執行環境" if item.get("runtime") else "應用程式"
         rows.append(Package(item.get("name") or ident, ident, item.get("version") or "未知", "Flatpak", scope,
                             item.get("description") or kind,
-                            f"bauh Flatpak 模組：目前記錄的遠端來源 {origin}；不代表最初安裝方式"))
+                            f"bauh Flatpak 模組：目前記錄的遠端來源 {origin}；不代表最初安裝方式",
+                            is_application=not bool(item.get('runtime')), icon=(ident.split('/')[0] if not item.get('runtime') else '')))
     return ScanResult("Flatpak", rows, "ok", "包含應用程式與執行環境")
 
 
@@ -96,8 +135,10 @@ def snap():
     rows = []
     for item in data["result"]:
         name = item.get("name") or "未知"
-        rows.append(Package(item.get("title") or name, name, item.get("version") or "未知", "Snap", "系統",
-                            item.get("summary") or "", "bauh snapd 介面：目前已安裝的 Snap"))
+        desktops=list(Path('/var/lib/snapd/desktop/applications').glob(name+'_*.desktop')) if re.fullmatch(r'[a-z0-9-]+',name) else []
+        metadata=next((m for m in (desktop_metadata(p) for p in desktops) if m),None)
+        rows.append(Package((metadata[0] if metadata else '') or item.get("title") or name, name, item.get("version") or "未知", "Snap", "系統",
+                            item.get("summary") or "", "bauh snapd 介面：目前已安裝的 Snap",is_application=bool(metadata),icon=metadata[1] if metadata else ''))
     return ScanResult("Snap", rows, "ok")
 
 
@@ -114,8 +155,13 @@ def appimage():
             if resolved in seen:
                 continue
             seen.add(resolved)
-            rows.append(Package(path.stem, resolved, "未知", "AppImage", "使用者", "偵測到 AppImage 檔案",
-                                "依檔案副檔名偵測；不代表已安裝或經過驗證", str(path)))
+            digest=hashlib.sha256(resolved.encode('utf-8')).hexdigest()[:16]
+            desktop=Path.home()/'.local/share/applications'/f'packscope-{digest}.desktop'
+            try: managed=('X-PackScope-Target='+json.dumps(resolved,ensure_ascii=True)) in desktop.read_text(encoding='utf-8').splitlines()
+            except (OSError,UnicodeError): managed=False
+            state='PackScope 管理' if managed else '偵測到檔案'
+            rows.append(Package(path.stem, resolved, "未知", "AppImage", "使用者", state,
+                                "已建立 PackScope 捷徑" if managed else "依副檔名偵測的檔案；未確認整合狀態", str(path),True,'application-x-executable',state))
     # bauh stores its managed AppImages as metadata; do not execute the file.
     for item in glob.glob(str(Path.home() / ".local/share/bauh/appimage/installed/*/data.json")):
         # Managed metadata may contain richer details, but it is not a file path guarantee.
@@ -127,7 +173,7 @@ def appimage():
             if location and any(location == r.location or r.location.startswith(location + os.sep) for r in rows):
                 continue
             rows.append(Package(name, item, str(metadata.get("version") or "未知"), "AppImage", "使用者",
-                                "bauh 管理的 AppImage", "bauh 的 AppImage 安裝紀錄", location))
+                                "bauh 管理的 AppImage", "bauh 的 AppImage 安裝紀錄", location,True,'application-x-executable','bauh 管理'))
         except (OSError, ValueError, TypeError):
             continue
     return ScanResult("AppImage", rows, "ok", "掃描 ~/Applications、~/AppImages、~/Downloads 與 bauh 安裝紀錄；結果可能不完整")

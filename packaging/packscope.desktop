@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=PackScope
+Comment=管理已安裝的軟體及更新
+Exec=packscope
+Icon=packscope
+Terminal=false
+Categories=System;PackageManager;
+StartupNotify=true

@@ -1,4 +1,4 @@
-# PackScope 0.1.0
+# PackScope 0.2.0 開發版
 
 PackScope 是以 bauh 為基底的 Ubuntu 軟體管理介面，使用 PyQt5。
 
@@ -13,6 +13,9 @@ cd PackScope
 
 - 按「安裝軟體」選擇本機 `.deb`、`.snap`、`.flatpak`、`.flatpakref` 或 `.AppImage` 檔案，程式會依副檔名選擇套件管理器，安裝完成後重新掃描清單。Flatpak 檔案安裝至目前使用者；AppImage 會複製到 `~/Applications` 並建立桌面捷徑。本機 Snap 使用 `--dangerous`，不驗證商店簽章；某些 Snap 可能另有安裝限制。
 - 按「安裝軟體」右側的箭頭，選「依名稱安裝」可使用原有的來源安裝方式：APT 可搜尋套件，Snap、Flatpak、pipx、npm 和 Cargo 可輸入名稱或 ID。
+- 按「檢查更新」可查看各來源的更新結果，勾選一個或多個已辨識的項目後更新。按「重新取得套件資訊」會重新取得 APT 及 Flatpak 的來源資訊；Snap 以自己的服務查詢。Flatpak 未提供版本時顯示「未知」。
+- 勾選搜尋欄旁的「僅顯示應用程式」，可依桌面啟動項目或來源資料篩選；資料不完整時，請取消勾選查看全部套件。
+- AppImage 清單會標示由 PackScope 或 bauh 管理的項目，以及僅偵測到的檔案；後者不代表已整合至系統。
 - 從清單選擇項目，按「開啟」、「更新」或「移除」。只有辨識到可用啟動方式的應用程式才能開啟。AppImage 移除會將檔案及 PackScope 建立的捷徑移至垃圾桶；AppImage 不提供統一的更新操作。
 - 需要管理員權限時，Ubuntu 會開啟系統授權視窗供輸入密碼。PackScope 不接收或保存密碼。
 - 視窗下方固定顯示輸出紀錄；開啟程式時是空白的，之後保留本次執行期間的操作與輸出。操作在背景執行，進度列顯示實際指令及即時輸出，完成後重新整理清單。能取得百分比時顯示該階段的進度；管理器未提供百分比時顯示執行中動畫。
@@ -25,7 +28,11 @@ cd PackScope
 
 APT 清單包含系統程式庫；Flatpak 也包含執行環境。AppImage 僅掃描 `~/Applications`、`~/AppImages`、`~/Downloads` 第一層和 bauh 安裝紀錄。開發工具只涵蓋目前使用者的 pipx、目前 PATH 中 npm 的全域環境與目前 CARGO_HOME。
 
-APT 更新查詢使用本機套件清單，Flatpak 使用本機快取，Snap 會連線查詢。AppImage 與開發工具的統一更新查詢尚未提供；個別開發工具的更新按鈕會呼叫其管理器。
+APT 更新查詢使用本機套件清單，Flatpak 使用本機快取，Snap 會連線查詢。AppImage 與開發工具的統一更新查詢尚未提供；個別開發工具的更新按鈕會呼叫其管理器。依桌面項目辨識應用程式可能有遺漏，並非完整的套件分類。
+
+## 製作 Ubuntu 安裝套件
+
+在已安裝 `dpkg-deb` 的 Ubuntu 電腦上，從專案根目錄執行 `sh packaging/build-deb.sh`。產生的檔案位於 `dist/`；安裝後可從應用程式選單或執行 `packscope` 開啟。Flatpak、Snap 等來源仍需要各自的套件管理器。
 
 ## 上游
 

@@ -86,6 +86,20 @@ def make_file_install(filename: str) -> Operation:
     return make_operation(package, 'install')
 
 
+def metadata_operations():
+    """Refresh available repository data through the installed managers."""
+    operations=[]
+    if shutil.which('apt-get'):
+        package=Package('APT 套件資訊','apt-metadata','未知','APT / dpkg','系統')
+        operations.append(Operation('refresh',package,_privileged([_binary('apt-get'),'update']),True))
+    if shutil.which('flatpak'):
+        for scope,flag in (('使用者','--user'),('系統','--system')):
+            package=Package(f'Flatpak {scope}資訊','flatpak-metadata','未知','Flatpak',scope)
+            operations.append(Operation('refresh',package,(_binary('flatpak'),'update',flag,'--appstream','-y'),scope=='系統'))
+    if not operations: raise ValueError('找不到可重新取得資訊的套件管理器。')
+    return operations
+
+
 def make_operation(package: Package, action: str, remote: str = 'flathub') -> Operation:
     if action not in ('install', 'update', 'remove'):
         raise ValueError('不支援的操作。')

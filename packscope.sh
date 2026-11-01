@@ -1,5 +1,5 @@
 #!/bin/sh
-# Start the PackScope read-only interface from its own checkout.
+# Start PackScope from its own checkout.
 set -eu
 PROJECT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "$PROJECT_DIR"

@@ -21,13 +21,14 @@ class BackendTests(unittest.TestCase):
         command.side_effect = [
             subprocess.CompletedProcess([], 0, 'Inst example [1] (2 repo)\n', ''),
             subprocess.CalledProcessError(1, 'flatpak'),
+            subprocess.CompletedProcess([], 0, '', ''),
             subprocess.CompletedProcess([], 0, 'Name Version Rev Size Publisher Notes\nexample 2 3 4 pub -\n', ''),
         ]
         results = backend.check_updates()
         self.assertIn('example  1 → 2', results[0][2])
         self.assertIsNotNone(results[1][3])
-        self.assertEqual(len(results[2][2]), 1)
-        self.assertIn('尚未檢查', results[3][1])
+        self.assertEqual(len(results[3][2]), 1)
+        self.assertIn('尚未檢查', results[4][1])
 
     def test_export_is_filtered_and_csv_formulas_are_neutralized(self):
         rows = [package('=unsafe'), package('normal')]

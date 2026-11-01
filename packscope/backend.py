@@ -1,5 +1,5 @@
 """Read-only package queries and export functions for PackScope."""
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime
 import csv
 import gzip
@@ -16,6 +16,55 @@ from packscope.inventory import Package, command
 APT_NAME = re.compile(r'^[a-z0-9][a-z0-9+.-]*(?::[a-z0-9][a-z0-9-]*)?$')
 SNAP_NAME = re.compile(r'^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$')
 FLATPAK_REF = re.compile(r'^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$')
+
+
+@dataclass(frozen=True)
+class UpdateItem:
+    name: str
+    manager: str
+    current: str
+    candidate: str
+    package: object = None
+
+
+def update_items(sections, installed):
+    """Map manager results to exact installed records; ambiguous rows stay disabled."""
+    items=[]; native_arch=None; arch_checked=False
+    for manager, note, entries, error in sections:
+        if error: continue
+        scope=manager.split(' / ',1)[1] if manager.startswith('Flatpak / ') else None
+        source_manager='Flatpak' if scope else manager
+        for entry in entries:
+            current=candidate='未知'; ident=''
+            if source_manager == 'APT / dpkg':
+                match=re.match(r'^(\S+)\s+(\S+)\s+→\s+(\S+)$',entry)
+                if not match: continue
+                ident,current,candidate=match.groups()
+            elif source_manager == 'Flatpak':
+                fields=entry.split('  ·  ')
+                ident=fields[0].strip()
+                candidate=fields[2].strip() if len(fields)>2 and fields[2].strip() else '未知'
+                if ident.startswith(('app/','runtime/')): ident=ident.split('/',1)[1]
+                if not FLATPAK_REF.fullmatch(ident): continue
+            elif source_manager == 'Snap':
+                fields=entry.split()
+                if not fields: continue
+                ident=fields[0]
+                candidate=fields[1] if len(fields)>1 else '未知'
+            else: continue
+            matches=[p for p in installed if p.manager==source_manager and p.ident==ident and (scope is None or p.scope==scope)]
+            if not matches and source_manager=='APT / dpkg' and ':' not in ident:
+                if not arch_checked:
+                    arch_checked=True
+                    try: native_arch=command(['dpkg','--print-architecture'],timeout=5).stdout.strip()
+                    except (OSError,subprocess.SubprocessError): native_arch=None
+                if native_arch:
+                    matches=[p for p in installed if p.manager==source_manager and p.ident==f'{ident}:{native_arch}']
+            if matches:
+                for package in matches:
+                    items.append(UpdateItem(package.name, source_manager, package.version if current=='未知' else current, candidate, package))
+            else: items.append(UpdateItem(ident,manager,current,candidate))
+    return items
 
 
 def safe_name(pattern, value):
@@ -97,13 +146,15 @@ def check_updates():
         sections.append(('APT / dpkg', note, updates, None))
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
         sections.append(('APT / dpkg', '', [], str(exc)))
-    try:
-        # --cached avoids updating remote metadata; results may be stale.
-        result = command(['flatpak', 'remote-ls', '--updates', '--cached', '--columns=ref,origin'], timeout=30)
-        updates = [line.strip().replace('\t', '  ·  ') for line in result.stdout.splitlines() if line.strip()]
-        sections.append(('Flatpak', '依本機快取查詢，資訊可能不是最新。', updates, None))
-    except (OSError, subprocess.SubprocessError, ValueError) as exc:
-        sections.append(('Flatpak', '', [], str(exc)))
+    for scope,flag in (('系統','--system'),('使用者','--user')):
+        try:
+            # Query each installation independently: an update in one scope
+            # must not be presented as an update in the other.
+            result = command(['flatpak', 'remote-ls', flag, '--updates', '--cached', '--columns=ref,origin,version'], timeout=30)
+            updates = [line.strip().replace('\t', '  ·  ') for line in result.stdout.splitlines() if line.strip()]
+            sections.append((f'Flatpak / {scope}', '依本機快取查詢，資訊可能不是最新。', updates, None))
+        except (OSError, subprocess.SubprocessError, ValueError) as exc:
+            sections.append((f'Flatpak / {scope}', '', [], str(exc)))
     try:
         result = command(['snap', 'refresh', '--list'], timeout=45)
         lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
