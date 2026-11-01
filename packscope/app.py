@@ -576,7 +576,10 @@ class Window(QMainWindow):
     def install_software(self):
         if self.operation_busy: return
         path,_=QFileDialog.getOpenFileName(self,'選擇安裝檔','','支援的安裝檔 (*.deb *.DEB *.snap *.SNAP *.flatpak *.FLATPAK *.flatpakref *.FLATPAKREF *.AppImage *.appimage *.APPIMAGE);;所有檔案 (*)',options=QFileDialog.DontUseNativeDialog)
-        if not path: return
+        if path: self.install_file(path)
+    def install_file(self, path):
+        """Open a local installer selected in the UI or passed by a file manager."""
+        if self.operation_busy: return
         try:
             operation=actions.make_file_install(path)
         except (OSError, ValueError) as error:
@@ -787,11 +790,15 @@ class Window(QMainWindow):
 
 
 def main():
+    requested_file=sys.argv[1] if len(sys.argv)>1 else None
     app=QApplication(sys.argv); app.setApplicationName('PackScope'); app.setFont(QFont('Noto Sans CJK TC', 10))
     app.setDesktopFileName('packscope'); app.setWindowIcon(QIcon(str(Path(__file__).resolve().parent/'assets'/'packscope.svg')))
     translator=QTranslator(app)
     if translator.load('qtbase_zh_TW',QLibraryInfo.location(QLibraryInfo.TranslationsPath)):
         app.installTranslator(translator)
-    window=Window(); window.show(); sys.exit(app.exec_())
+    window=Window(); window.show()
+    if requested_file:
+        QTimer.singleShot(0, lambda: window.install_file(requested_file))
+    sys.exit(app.exec_())
 
 if __name__ == '__main__': main()

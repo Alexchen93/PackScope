@@ -25,7 +25,11 @@ class PackageBuildTests(unittest.TestCase):
             self.assertTrue((extracted/'usr/bin/packscope').is_file())
             self.assertTrue((extracted/'usr/lib/packscope/packscope/app.py').is_file())
             desktop=(extracted/'usr/share/applications/packscope.desktop').read_text()
-            self.assertIn('Exec=packscope',desktop)
+            self.assertIn('Exec=packscope %f',desktop)
+            for mime in ('application/vnd.debian.binary-package', 'application/vnd.snap',
+                         'application/vnd.flatpak', 'application/vnd.flatpak.ref',
+                         'application/vnd.appimage'):
+                self.assertIn(mime+';',desktop)
             installed_icon=extracted/'usr/share/icons/hicolor/scalable/apps/packscope.svg'
             self.assertTrue(installed_icon.is_file())
             self.assertEqual(installed_icon.read_bytes(),(root/'packscope/assets/packscope.svg').read_bytes())

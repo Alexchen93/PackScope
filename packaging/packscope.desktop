@@ -2,8 +2,9 @@
 Type=Application
 Name=PackScope
 Comment=管理已安裝的軟體及更新
-Exec=packscope
+Exec=packscope %f
 Icon=packscope
 Terminal=false
 Categories=System;PackageManager;
+MimeType=application/vnd.debian.binary-package;application/x-deb;application/vnd.snap;application/vnd.flatpak;application/vnd.flatpak.ref;application/vnd.appimage;
 StartupNotify=true

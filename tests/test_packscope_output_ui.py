@@ -29,6 +29,25 @@ class OutputUITests(unittest.TestCase):
             time.sleep(.01)
         self.fail('等待介面背景作業逾時')
 
+    def test_opened_installer_uses_detected_manager_without_file_picker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'example package.snap'; path.write_bytes(b'fixture')
+            with patch('packscope.app.scan_all',return_value=[]), \
+                 patch('packscope.actions.shutil.which',side_effect=lambda name:'/usr/bin/'+name), \
+                 patch.object(QFileDialog,'getOpenFileName') as choose:
+                w=Window(self.settings)
+                try:
+                    with patch.object(w,'perform_operation') as perform:
+                        w.install_file(str(path))
+                    choose.assert_not_called()
+                    operation=perform.call_args.kwargs['operation']
+                    self.assertEqual(operation.package.manager,'Snap')
+                    self.assertEqual(operation.package.location,str(path))
+                    self.assertEqual(operation.argv[-1],str(path))
+                finally:
+                    self.wait_for(lambda:w.thread is None)
+                    w.close(); self.app.processEvents()
+
     def test_install_button_selects_file_and_refreshes_installed_list(self):
         installed=Package('example','example','1','APT / dpkg','系統',is_application=True)
         state={'installed':False}
