@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-version=0.2.0~dev1
+version=$(cd "$project_dir" && python3 -c 'import packscope; print(packscope.__version__.replace(".dev", "~dev"))')
 destination=${1:-"$project_dir/dist"}
 mkdir -p "$destination"
 destination=$(CDPATH= cd -- "$destination" && pwd)

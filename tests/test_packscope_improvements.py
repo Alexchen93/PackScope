@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
-from PyQt5.QtCore import QTimer, Qt
+from PyQt5.QtCore import QSettings, QTimer, Qt
 from PyQt5.QtWidgets import QApplication, QMessageBox, QPushButton, QTableWidget
 from packscope import actions, backend, inventory
 from packscope.app import Window, Filter, Model
@@ -18,6 +18,11 @@ from packscope.inventory import Package, ScanResult
 class ImprovementTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls): cls.app=QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        config=tempfile.TemporaryDirectory()
+        self.addCleanup(config.cleanup)
+        self.settings=QSettings(str(Path(config.name)/'settings.ini'),QSettings.IniFormat)
     def wait_for(self,condition,timeout=4):
         until=time.monotonic()+timeout
         while time.monotonic()<until:
@@ -94,7 +99,7 @@ class ImprovementTests(unittest.TestCase):
              patch('packscope.actions.execute',side_effect=execute), \
              patch.object(QMessageBox,'question',return_value=QMessageBox.Yes), \
              patch.object(QMessageBox,'warning'):
-            w=Window(); w.show()
+            w=Window(self.settings); w.show()
             try:
                 self.wait_for(lambda:w.thread is None)
                 def choose():

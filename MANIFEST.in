@@ -8,3 +8,6 @@ recursive-exclude bauh/gems/*/resources *.orig
 recursive-exclude linux_dist *
 recursive-exclude venv *
 recursive-exclude .venv *
+
+recursive-include packscope/assets *.svg
+recursive-include packscope/icons *.svg

@@ -319,7 +319,7 @@ class Window(QMainWindow):
         self.results = []; self.thread = None; self.jobs = set(); self.operation_busy = False; self.manual_scan_pending = False; self.refresh_after_scan = False; self.buttons = {}
         self.launch_generation = 0; self.launch_targets = []
         self.launch_timer = QTimer(self); self.launch_timer.setSingleShot(True); self.launch_timer.timeout.connect(self.discover_launchers)
-        self.build(); self.apply_theme(); self.refresh()
+        self.build(); self.apply_theme(); self.restore_view(); self.refresh()
     def label(self, text, name=None, wrap=False):
         l=QLabel(text); l.setTextFormat(Qt.PlainText); l.setWordWrap(wrap); l.setTextInteractionFlags(Qt.TextSelectableByMouse)
         if name: l.setObjectName(name)
@@ -336,14 +336,14 @@ class Window(QMainWindow):
         self.theme=QPushButton('☼  切換主題'); self.theme.clicked.connect(self.toggle_theme); top.addWidget(self.theme)
         self.refresh_button=QPushButton('↻  重新掃描'); self.refresh_button.clicked.connect(self.manual_refresh); top.addWidget(self.refresh_button); main.addLayout(top)
         controls=QHBoxLayout(); self.search=QLineEdit(); self.search.setPlaceholderText('搜尋名稱、套件 ID 或描述…'); self.search.setClearButtonEnabled(True); controls.addWidget(self.search,1)
-        self.app_filter=QCheckBox('僅顯示應用程式'); self.app_filter.setToolTip('依桌面啟動項目及來源資訊辨識；可能不包含所有程式。'); self.app_filter.toggled.connect(self.filter_applications); controls.addWidget(self.app_filter)
+        self.app_filter=QCheckBox('僅顯示應用程式'); self.app_filter.setToolTip('預設只看辨識到的應用程式；取消勾選可查看系統套件和開發工具。辨識結果可能有遺漏。'); self.app_filter.toggled.connect(self.filter_applications); controls.addWidget(self.app_filter)
         self.count=self.label('準備掃描…','badge'); controls.addWidget(self.count); main.addLayout(controls)
         sources=QHBoxLayout(); sources.setSpacing(7); sources.addWidget(self.label('來源','caption')); sources.addSpacing(4)
         for name in ('全部來源','APT / dpkg','Snap','Flatpak','AppImage','開發工具'):
             button=QPushButton(name); button.setObjectName('nav'); button.setCheckable(True); button.clicked.connect(lambda checked, n=name:self.select_manager(n)); sources.addWidget(button); self.buttons[name]=button
         self.sources_help_button=QPushButton('?'); self.sources_help_button.setObjectName('help'); self.sources_help_button.setFixedSize(68,40); self.sources_help_button.setToolTip('了解各種軟體來源'); self.sources_help_button.setAccessibleName('了解軟體來源'); self.sources_help_button.clicked.connect(self.show_sources_help); sources.addWidget(self.sources_help_button)
-        self.buttons['全部來源'].setChecked(True); sources.addStretch(); sources.addWidget(self.label('拖曳欄位邊界調整寬度','muted')); main.addLayout(sources)
-        vertical_splitter=QSplitter(Qt.Vertical); vertical_splitter.setHandleWidth(8); vertical_splitter.setChildrenCollapsible(False); main.addWidget(vertical_splitter,1)
+        self.buttons['全部來源'].setChecked(True); sources.addStretch(); main.addLayout(sources)
+        vertical_splitter=QSplitter(Qt.Vertical); self.vertical_splitter=vertical_splitter; vertical_splitter.setHandleWidth(8); vertical_splitter.setChildrenCollapsible(False); main.addWidget(vertical_splitter,1)
         splitter=QSplitter(Qt.Horizontal); self.splitter=splitter; splitter.setHandleWidth(10); splitter.setChildrenCollapsible(False); vertical_splitter.addWidget(splitter)
         self.model=Model(); self.proxy=Filter(); self.proxy.setSourceModel(self.model); self.search.textChanged.connect(self.search_changed)
         self.table=QTableView(); self.table.setMinimumWidth(350); self.table.setModel(self.proxy); self.table.setHorizontalHeader(FittedHeader(self.table)); self.table.setSelectionBehavior(QAbstractItemView.SelectRows); self.table.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -421,14 +421,46 @@ class Window(QMainWindow):
         def customize_theme():
             if self.edit_custom_theme(): dialog.accept()
         customize.clicked.connect(customize_theme); dialog.exec_()
+    def restore_view(self):
+        self.app_filter.setChecked(self.settings.value('view/applications_only', True, type=bool))
+        source=self.settings.value('view/source', '全部來源', type=str)
+        self.select_manager(source if source in self.buttons else '全部來源')
+        self.search.setText(self.settings.value('view/query', '', type=str))
+        for key, widget in (('view/columns', self.table.horizontalHeader()),
+                            ('view/panels', self.splitter),
+                            ('view/output', self.vertical_splitter)):
+            state=self.settings.value(key)
+            if state is not None: widget.restoreState(state)
     def select_manager(self, name):
+        if name == '開發工具' and self.app_filter.isChecked():
+            self.app_filter.setChecked(False)
         for key, button in self.buttons.items(): button.setChecked(key==name)
-        self.proxy.set_manager(name); self.clear_details(); self.update_count()
-    def search_changed(self, text): self.proxy.set_query(text); self.clear_details(); self.update_count()
-    def filter_applications(self, enabled): self.proxy.set_applications_only(enabled); self.clear_details(); self.update_count()
+        self.proxy.set_manager(name); self.settings.setValue('view/source', name)
+        self.clear_details(); self.update_count()
+    def search_changed(self, text):
+        self.proxy.set_query(text); self.settings.setValue('view/query', text)
+        self.clear_details(); self.update_count()
+    def filter_applications(self, enabled):
+        self.proxy.set_applications_only(enabled); self.settings.setValue('view/applications_only', enabled)
+        self.clear_details(); self.update_count()
     def clear_details(self):
         self.table.clearSelection(); self.table.setCurrentIndex(QModelIndex()); self.show_detail(QModelIndex(), QModelIndex())
-    def update_count(self): self.count.setText(f'{self.proxy.rowCount():,} 個項目')
+    def update_count(self):
+        visible=self.proxy.rowCount()
+        self.count.setText(f'顯示 {visible:,} / 全部 {len(self.model.rows):,} 項')
+        matching=(p for p in self.model.rows
+                  if (not self.proxy.applications_only or p.is_application)
+                  and (not self.proxy.query or self.proxy.query in ' '.join((p.name,p.ident,p.description)).casefold()))
+        counts={key:0 for key in self.buttons}
+        for package in matching:
+            counts['全部來源']+=1
+            if package.manager in counts: counts[package.manager]+=1
+            elif package.manager in ('pipx','npm global','Cargo'): counts['開發工具']+=1
+        labels={'全部來源':'全部','APT / dpkg':'APT','Snap':'Snap','Flatpak':'Flatpak',
+                'AppImage':'AppImage','開發工具':'開發工具'}
+        for key,button in self.buttons.items():
+            button.setText(f'{labels[key]} · {counts[key]:,}')
+
     def log_event(self, message):
         self.operation_output.appendPlainText(f'[{datetime.now().strftime("%H:%M:%S")}] {message}')
     def manual_refresh(self):
@@ -746,7 +778,12 @@ class Window(QMainWindow):
     def closeEvent(self, event):
         if (self.thread and self.thread.isRunning()) or any(t.isRunning() for t in self.jobs):
             self.status.setText('正在完成目前的查詢，請稍候再關閉。'); event.ignore()
-        else: event.accept()
+        else:
+            self.settings.setValue('view/columns', self.table.horizontalHeader().saveState())
+            self.settings.setValue('view/panels', self.splitter.saveState())
+            self.settings.setValue('view/output', self.vertical_splitter.saveState())
+            self.settings.sync()
+            event.accept()
 
 
 def main():

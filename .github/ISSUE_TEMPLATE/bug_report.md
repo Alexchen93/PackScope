@@ -1,35 +1,26 @@
 ---
-name: Bug report
-about: Create a report to help us improve
+name: PackScope bug report
+about: Report a problem with PackScope on Ubuntu
 title: ''
-labels: ''
+labels: bug
 assignees: ''
-
 ---
 
-**Before opening a new issue**
-Install the **staging** branch and check if the unexpected behavior is happening there as well.
-If you are on ArchLinux-based distro, you can install it through AUR (**bauh-staging**). Otherwise, you have
-to clone the repository and install it with pip:
-```
-git clone https://github.com/vinifmor/bauh.git -b staging --depth=1
-cd bauh
-python3 -m venv venv
-venv/bin/pip install pip --upgrade
-venv/bin/pip install setuptools --upgrade
-venv/bin/pip install -r requirements.txt
-venv/bin/pip install .
-venv/bin/bauh  # or venv/bin/bauh-tray
-```
- 
-**Describe the bug**
-A clear and concise description of what the bug is.
+**Environment**
+- PackScope version:
+- Ubuntu version:
+- Installation method (DEB or source):
+- Affected package manager:
 
-**Software Environment**
-bauh version: 
-O.S: name and version 
-Python version:
-Installation method: pip | distro package manager (e.g: pacman)
+**Steps to reproduce**
+1.
+2.
+3.
 
+**Expected result**
 
-P.S: these instructions and the template must be respected, otherwise your issue will be closed.
+**Actual result**
+
+**Relevant operation output or screenshots**
+
+Please remove private information from logs before posting.

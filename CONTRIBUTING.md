@@ -1,32 +1,26 @@
-# How can I contribute?
-Well, you can...
-* Report bugs
-* Add improvements
-* Fix bugs
-* Add new translations or fix the current ones
+# Contributing to PackScope
 
-# Reporting bugs
-The best means of reporting bugs is by following these basic guidelines:
+PackScope targets Ubuntu and provides a PyQt5 interface for software managed by
+APT, Snap, Flatpak, AppImage, and supported developer tools. The application
+uses selected modules from bauh; keep their attribution and license intact.
 
-* First describe in the title of the issue tracker what's gone wrong.
-* In the body, explain a basic synopsis of what exactly happens, explain how you got the bug one step at a time. If you're including script output, make sure you run the script with the verbose flag `-v`.
-* Explain what you had expected to occur, and what really occurred.
-* Optionally, if you want, if you're a programmer, you can try to issue a pull request yourself that fixes the issue.
+## Report a bug
 
-# Adding improvements
-The way to go here is to ask yourself if the improvement would be useful for more than just a singular person, if it's for a certain use case then sure!
+Open an issue with the PackScope version, Ubuntu version, installation method,
+steps to reproduce, expected and actual results, and relevant output from the
+operation panel. Remove personal information from logs before posting.
 
-* In any pull request, explain thoroughly what changes you made
-* Explain why you think these changes could be useful
-* If it fixes a bug, be sure to link to the issue itself.
-* Follow the [PEP 8](https://www.python.org/dev/peps/pep-0008/) code style to keep the code consistent.
+## Propose a change
 
-# Adding a new translation
-* To add a new translation, you will have to create a file in each directory listed below named as the first two letters of the language in the ISO format (e.g: for 'english' would be 'en'):
-- `bauh/view/resources/locale`
-- `bauh/gems/appimage/resources/locale`
-- `bauh/gems/arch/resources/locale`
-- `bauh/gems/flatpak/resources/locale`
-- `bauh/gems/snap/resources/locale`
-- `bauh/gems/web/resources/locale`
-- `bauh/gems/debian/resources/locale`
+Explain the user-facing problem and the scope of the change. Keep package
+manager operations explicit and preserve the distinction between detected
+files, installed packages, and their original installation source.
+
+Run the tests before submitting a pull request:
+
+```bash
+QT_QPA_PLATFORM=offscreen python3 -m unittest discover -s tests -p 'test_packscope*.py'
+```
+
+Changes to authentication, installation, updating, or removal should also be
+validated in an Ubuntu desktop environment; see `packscope/SAFETY.md`.
