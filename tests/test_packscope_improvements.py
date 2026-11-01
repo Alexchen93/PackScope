@@ -11,6 +11,7 @@ os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
 from PyQt5.QtCore import QSettings, QTimer, Qt
 from PyQt5.QtWidgets import QApplication, QMessageBox, QPushButton, QTableWidget
 from packscope import actions, backend, inventory
+from packscope.actions import OperationPreview
 from packscope.app import Window, Filter, Model
 from packscope.inventory import Package, ScanResult
 
@@ -96,8 +97,9 @@ class ImprovementTests(unittest.TestCase):
             return 'ok'
         with patch('packscope.app.scan_all',return_value=[ScanResult('APT / dpkg',[first,second],'ok')]), \
              patch('packscope.actions.shutil.which',side_effect=lambda name:'/usr/bin/'+name), \
+             patch('packscope.actions.preview_operations',return_value=OperationPreview(True,('更新：first 1 → 2','更新：second 1 → 2'))), \
              patch('packscope.actions.execute',side_effect=execute), \
-             patch.object(QMessageBox,'question',return_value=QMessageBox.Yes), \
+             patch.object(QMessageBox,'exec_',return_value=QMessageBox.Yes), \
              patch.object(QMessageBox,'warning'):
             w=Window(self.settings); w.show()
             try:

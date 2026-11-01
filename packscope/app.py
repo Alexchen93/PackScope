@@ -3,6 +3,7 @@ import sys
 import shlex
 import json
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 from PyQt5.QtCore import (QAbstractTableModel, QEvent, QLibraryInfo, QModelIndex, QObject, QSettings, QSortFilterProxyModel,
@@ -317,6 +318,9 @@ class Window(QMainWindow):
         if self.theme_name not in ('dark','light','custom'): self.theme_name='dark'
         self.current_colors=DARK; self.is_dark=True
         self.results = []; self.thread = None; self.jobs = set(); self.operation_busy = False; self.manual_scan_pending = False; self.refresh_after_scan = False; self.buttons = {}
+        self.operation_label = ''; self.operation_started_at = None; self.operation_last_output_at = None
+        self.operation_idle_warning_seconds = 60; self.operation_idle_reported = False
+        self.operation_timer = QTimer(self); self.operation_timer.setInterval(1000); self.operation_timer.timeout.connect(self.check_operation_activity)
         self.launch_generation = 0; self.launch_targets = []
         self.launch_timer = QTimer(self); self.launch_timer.setSingleShot(True); self.launch_timer.timeout.connect(self.discover_launchers)
         self.build(); self.apply_theme(); self.restore_view(); self.refresh()
@@ -520,6 +524,37 @@ class Window(QMainWindow):
         task.finished.connect(task.deleteLater); task.start()
     def operation_progress(self, value):
         self.operation_bar.setRange(0,100); self.operation_bar.setValue(value)
+    def start_operation_monitor(self, label):
+        now=time.monotonic(); self.operation_label=label
+        self.operation_started_at=now; self.operation_last_output_at=now; self.operation_idle_reported=False
+        self.operation_timer.start()
+    def stop_operation_monitor(self):
+        self.operation_timer.stop(); self.operation_label=''
+        self.operation_started_at=None; self.operation_last_output_at=None; self.operation_idle_reported=False
+    def operation_output_received(self, line):
+        self.operation_last_output_at=time.monotonic()
+        if self.operation_idle_reported:
+            self.status.setText(f'仍在{self.operation_label}；已收到新輸出。')
+            self.operation_idle_reported=False
+        self.operation_output.appendPlainText(line)
+    def check_operation_activity(self):
+        if self.operation_last_output_at is None:
+            return
+        idle=time.monotonic()-self.operation_last_output_at
+        if idle < self.operation_idle_warning_seconds or self.operation_idle_reported:
+            return
+        self.operation_idle_reported=True
+        elapsed=int(time.monotonic()-(self.operation_started_at or self.operation_last_output_at))
+        message=(f'{self.operation_label}仍在執行（已 {elapsed} 秒，{int(idle)} 秒沒有新輸出）。'
+                 '請查看系統授權視窗、網路狀態及下方輸出紀錄；為避免套件資料不完整，PackScope 不會強制終止套件管理器。')
+        self.status.setText(message); self.log_event(message)
+    def set_operation_busy(self, busy):
+        self.operation_busy=busy
+        self.install_button.setEnabled(not busy); self.update_button.setEnabled(not busy); self.refresh_button.setEnabled(not busy)
+        if busy:
+            self.open_button.setEnabled(False); self.remove_button.setEnabled(False); self.install_update_button.setEnabled(False)
+        else:
+            self.show_detail(self.table.currentIndex(),QModelIndex())
     def discover_launchers(self):
         package=self.selected_package(); generation=self.launch_generation
         if not package: return
@@ -640,25 +675,94 @@ class Window(QMainWindow):
         package=self.selected_package()
         if package and not self.operation_busy: self.perform_operation(package,action)
     def perform_operation(self, package, action, remote='flathub', operation=None):
+        if self.operation_busy: return
         try:
             operation=operation or actions.make_operation(package,action,remote)
         except ValueError as error:
             QMessageBox.warning(self,'無法執行',str(error)); return
+        if operation.package.manager == 'APT / dpkg' and action in ('install','update','remove'):
+            label={'install':'安裝','update':'更新','remove':'移除'}[action]
+            self.set_operation_busy(True)
+            self.status.setText(f'正在模擬 APT 對「{package.name}」的變更…')
+            self.operation_bar.setRange(0,0); self.operation_bar.show()
+            self.log_event(f'模擬 APT 變更：{label} {package.name}')
+            self.start_operation_monitor(f'APT {label}模擬')
+            self.run_task(lambda:actions.preview_operation(operation),
+                          lambda preview,error:self.operation_preview_done(operation,preview,error))
+            return
+        self.confirm_operation(operation)
+    def operation_preview_done(self, operation, preview, error):
+        self.stop_operation_monitor()
+        self.operation_bar.setRange(0,100); self.operation_bar.setValue(0); self.operation_bar.hide()
+        if error:
+            preview=actions.OperationPreview(False,warning=error)
+        elif not isinstance(preview,actions.OperationPreview):
+            preview=actions.OperationPreview(False,warning='APT 模擬未回傳可辨識的結果。')
+        if preview.available:
+            self.log_event(f'APT 模擬完成：{len(preview.changes)} 項變更。')
+            for change in preview.changes:
+                self.operation_output.appendPlainText('  '+change)
+            if preview.summary: self.operation_output.appendPlainText('  '+preview.summary)
+        else:
+            self.log_event('無法取得 APT 變更預覽：'+(preview.warning or '未知錯誤'))
+        self.confirm_operation(operation,preview)
+    def ask_operation_confirmation(self, label, detail, preview=None):
+        icon=QMessageBox.Warning if preview is not None and not preview.available else QMessageBox.Question
+        box=QMessageBox(icon,label,detail,QMessageBox.Yes|QMessageBox.No,self)
+        box.setTextFormat(Qt.PlainText)
+        box.setDefaultButton(QMessageBox.No)
+        if preview is None:
+            return box.exec_()
+        if preview.available:
+            lines=[f'APT 變更預覽（依目前本機套件清單模擬）：共 {len(preview.changes)} 項。']
+            if preview.summary: lines.append(preview.summary)
+            if preview.notice: lines.append(preview.notice)
+            if preview.changes:
+                lines.extend(preview.changes[:10])
+                if len(preview.changes)>10: lines.append(f'…另有 {len(preview.changes)-10} 項，請展開「顯示詳細資料」。')
+            else:
+                lines.append('沒有偵測到套件安裝、升級或移除。')
+            box.setInformativeText('\n'.join(lines)+'\n\n模擬依目前套件清單計算，實際執行結果仍可能不同。')
+            detailed='\n'.join(preview.changes) if preview.changes else '沒有列出套件變更。'
+            if preview.output: detailed+='\n\nAPT 模擬輸出：\n'+preview.output
+            box.setDetailedText(detailed)
+        else:
+            box.setIcon(QMessageBox.Warning)
+            information='無法產生此操作的變更預覽。若繼續，仍會執行此操作；請只在了解風險後確認。\n原因：'+(preview.warning or '未知錯誤')
+            if preview.notice: information+='\n'+preview.notice
+            box.setInformativeText(information)
+            if preview.output: box.setDetailedText(preview.output)
+        return box.exec_()
+    def confirm_operation(self, operation, preview=None):
+        package=operation.package; action=operation.action
         label={'install':'安裝','update':'更新','remove':'移除'}[action]
         detail=f'{label}「{package.name}」？\n\n來源：{package.manager}\n識別碼：{package.ident}'
         if package.manager == 'AppImage' and action == 'remove': detail+='\n\n檔案會移至垃圾桶。'
         if package.manager == 'Cargo' and action == 'update': detail+='\n\nCargo 將從目前設定的登錄來源重新安裝此工具。'
         if action == 'install' and package.location and package.manager == 'Snap': detail+='\n\n本機 Snap 檔案以 --dangerous 安裝，不會驗證商店簽章。'
         if operation.needs_auth: detail+='\n\n系統需要權限時，請在 Ubuntu 授權視窗輸入密碼。'
-        if QMessageBox.question(self,label,detail,QMessageBox.Yes|QMessageBox.No,QMessageBox.No) != QMessageBox.Yes: return
-        self.operation_busy=True; self.install_button.setEnabled(False); self.open_button.setEnabled(False); self.remove_button.setEnabled(False); self.install_update_button.setEnabled(False); self.refresh_button.setEnabled(False)
+        if preview is None:
+            preview=actions.OperationPreview(False,warning=f'{package.manager} 目前沒有可用的安全變更模擬。')
+        answer=self.ask_operation_confirmation(label,detail,preview)
+        if answer != QMessageBox.Yes:
+            if self.operation_busy:
+                self.set_operation_busy(False)
+                self.operation_bar.setRange(0,100); self.operation_bar.setValue(0); self.operation_bar.hide()
+            self.status.setText(f'已取消{label}；未執行套件變更。')
+            self.log_event(f'使用者取消{label}：{package.name}')
+            return
+        self.start_operation(operation,label)
+    def start_operation(self, operation, label=None):
+        package=operation.package; action=operation.action
+        label=label or {'install':'安裝','update':'更新','remove':'移除'}[action]
+        self.set_operation_busy(True)
         self.status.setText(f'正在{label} {package.name}，請留意系統授權視窗…')
         self.operation_bar.setRange(0,0); self.operation_bar.show()
         self.log_event(f'開始{label}：{package.name}（{package.manager}）')
         if operation.needs_auth: self.operation_output.appendPlainText('如系統要求密碼，請在 Ubuntu 授權視窗中輸入。')
+        self.start_operation_monitor(f'{label}「{package.name}」')
         def done(result,error):
-            self.operation_busy=False; self.install_button.setEnabled(True)
-            self.refresh_button.setEnabled(True); self.show_detail(self.table.currentIndex(),QModelIndex())
+            self.stop_operation_monitor(); self.set_operation_busy(False)
             self.status.setText(f'{label}未完成。' if error else f'{label}完成，正在重新整理清單。')
             if error:
                 if self.operation_bar.maximum() == 0: self.operation_bar.setRange(0,100); self.operation_bar.setValue(0)
@@ -671,7 +775,7 @@ class Window(QMainWindow):
             if self.thread is not None: self.refresh_after_scan=True
             else: self.refresh_after_scan=False; self.refresh()
         task=OperationTask(operation,self); self.jobs.add(task)
-        task.output.connect(self.operation_output.appendPlainText); task.progress.connect(self.operation_progress)
+        task.output.connect(self.operation_output_received); task.progress.connect(self.operation_progress)
         task.result_ready.connect(done); task.finished.connect(lambda:self.jobs.discard(task)); task.finished.connect(task.deleteLater); task.start()
     def show_history(self):
         package=self.selected_package()
@@ -740,9 +844,46 @@ class Window(QMainWindow):
             try: operations=[actions.make_operation(p,'update') for p in chosen]
             except ValueError as error: QMessageBox.warning(dialog,'無法更新',str(error)); return
             detail='\n'.join(f'{p.name}（{p.manager}）' for p in chosen)
-            if QMessageBox.question(dialog,'更新軟體',f'確定更新以下 {len(chosen)} 個項目？\n\n{detail}',QMessageBox.Yes|QMessageBox.No,QMessageBox.No)!=QMessageBox.Yes: return
-            dialog.accept(); self.run_batch(operations,'更新軟體')
+            if any(op.package.manager == 'APT / dpkg' for op in operations):
+                dialog.accept(); self.prepare_batch_preview(operations,'更新軟體'); return
+            dialog.accept()
+            preview=actions.OperationPreview(False,warning='Snap 與 Flatpak 目前沒有納入安全的變更模擬。')
+            self.confirm_batch_operations(operations,'更新軟體',preview)
         update.clicked.connect(update_selected); dialog.exec_()
+    def prepare_batch_preview(self, operations, label):
+        self.set_operation_busy(True)
+        self.status.setText('正在模擬所選 APT 更新…')
+        self.operation_bar.setRange(0,0); self.operation_bar.show()
+        self.log_event(f'模擬 {label} 中的 APT 變更。')
+        self.start_operation_monitor('APT 變更模擬')
+        self.run_task(lambda:actions.preview_operations(operations),
+                      lambda preview,error:self.batch_preview_done(operations,label,preview,error))
+    def batch_preview_done(self, operations, label, preview, error):
+        self.stop_operation_monitor()
+        self.operation_bar.setRange(0,100); self.operation_bar.setValue(0); self.operation_bar.hide()
+        if error:
+            preview=actions.OperationPreview(False,warning=error)
+        elif not isinstance(preview,actions.OperationPreview):
+            preview=actions.OperationPreview(False,warning='APT 模擬未回傳可辨識的結果。')
+        if preview.available:
+            self.log_event(f'APT 批次模擬完成：{len(preview.changes)} 項變更。')
+            for change in preview.changes: self.operation_output.appendPlainText('  '+change)
+            if preview.summary: self.operation_output.appendPlainText('  '+preview.summary)
+        else:
+            self.log_event('無法取得 APT 批次變更預覽：'+(preview.warning or '未知錯誤'))
+        self.confirm_batch_operations(operations,label,preview)
+    def confirm_batch_operations(self, operations, label, preview):
+        detail='\n'.join(f'{op.package.name}（{op.package.manager}）' for op in operations)
+        prompt=f'確定{label}以下 {len(operations)} 個項目？\n\n{detail}'
+        answer=self.ask_operation_confirmation(label,prompt,preview)
+        if answer != QMessageBox.Yes:
+            self.set_operation_busy(False)
+            self.operation_bar.setRange(0,100); self.operation_bar.setValue(0); self.operation_bar.hide()
+            self.status.setText(f'已取消{label}；未執行套件變更。')
+            self.log_event(f'使用者取消{label}。')
+            return
+        self.set_operation_busy(False)
+        self.run_batch(operations,label)
     def refresh_metadata(self):
         if self.operation_busy: QMessageBox.information(self,'重新取得套件資訊','目前有其他作業進行中，請稍候。'); return
         try: operations=actions.metadata_operations()
@@ -751,19 +892,19 @@ class Window(QMainWindow):
         self.run_batch(operations,'重新取得套件資訊',check_after=True)
     def run_batch(self, operations, label, check_after=False):
         if self.operation_busy or not operations: return
-        self.operation_busy=True; self.install_button.setEnabled(False); self.update_button.setEnabled(False); self.refresh_button.setEnabled(False)
-        self.open_button.setEnabled(False); self.remove_button.setEnabled(False); self.install_update_button.setEnabled(False)
+        self.set_operation_busy(True)
         self.status.setText(f'正在{label}…'); self.operation_bar.setRange(0,0); self.operation_bar.show(); self.log_event(f'開始{label}。')
+        self.start_operation_monitor(label)
         def done(succeeded, failures):
-            self.operation_busy=False; self.install_button.setEnabled(True); self.update_button.setEnabled(True); self.refresh_button.setEnabled(True)
-            self.show_detail(self.table.currentIndex(),QModelIndex()); self.operation_bar.setRange(0,100); self.operation_bar.setValue(100 if not failures else 0)
+            self.stop_operation_monitor(); self.set_operation_busy(False)
+            self.operation_bar.setRange(0,100); self.operation_bar.setValue(100 if not failures else 0)
             result=f'{label}完成：成功 {succeeded} 項，失敗 {len(failures)} 項。'
             self.status.setText(result); self.log_event(result)
             if failures: QMessageBox.warning(self,f'{label}未完全完成',result+'\n\n'+'\n'.join(f'{name}：{error.splitlines()[0]}' for name,error in failures))
             if self.thread is not None: self.refresh_after_scan=True
             else: self.refresh_after_scan=False; self.refresh()
             if check_after: self.check_updates()
-        task=BatchOperationTask(operations,self); self.jobs.add(task); task.output.connect(self.operation_output.appendPlainText); task.progress.connect(self.operation_progress)
+        task=BatchOperationTask(operations,self); self.jobs.add(task); task.output.connect(self.operation_output_received); task.progress.connect(self.operation_progress)
         task.result_ready.connect(done); task.finished.connect(lambda:self.jobs.discard(task)); task.finished.connect(task.deleteLater); task.start()
     def export_list(self):
         path,chosen=QFileDialog.getSaveFileName(self,'匯出目前顯示的清單','packscope.json','JSON (*.json);;CSV (*.csv);;Markdown (*.md)')
@@ -780,7 +921,16 @@ class Window(QMainWindow):
         self.status.setText(f'已匯出 {len(packages):,} 個目前顯示的項目。')
     def closeEvent(self, event):
         if (self.thread and self.thread.isRunning()) or any(t.isRunning() for t in self.jobs):
-            self.status.setText('正在完成目前的查詢，請稍候再關閉。'); event.ignore()
+            event.ignore()
+            if self.operation_busy:
+                message=('目前仍有套件操作或 APT 變更模擬在執行，PackScope 不會強制終止套件管理器，'
+                         '以免留下未完成的套件狀態。請查看下方輸出及 Ubuntu 授權視窗；若作業沒有輸出，'
+                         '也請檢查網路。可以最小化視窗，完成後再關閉。')
+                self.status.setText('套件作業仍在執行；請查看授權視窗與輸出紀錄，完成後再關閉。')
+            else:
+                message='目前仍有背景查詢或掃描在執行，請稍候完成後再關閉；也可以先最小化視窗。'
+                self.status.setText('背景查詢仍在執行，請稍候再關閉。')
+            self.log_event('關閉要求已延後：'+message)
         else:
             self.settings.setValue('view/columns', self.table.horizontalHeader().saveState())
             self.settings.setValue('view/panels', self.splitter.saveState())

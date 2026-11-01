@@ -10,6 +10,7 @@ os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
 from PyQt5.QtCore import QSettings, QTimer
 from PyQt5.QtWidgets import QApplication, QMessageBox, QFileDialog, QComboBox
 from packscope.app import Window
+from packscope.actions import OperationPreview
 from packscope.inventory import Package, ScanResult
 
 class OutputUITests(unittest.TestCase):
@@ -60,10 +61,11 @@ class OutputUITests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp)/'my package.deb'; path.write_bytes(b'fixture')
             with patch('packscope.app.scan_all',side_effect=scan), \
-                 patch('packscope.actions.shutil.which',side_effect=lambda s:'/usr/bin/'+s), \
-                 patch('packscope.actions.execute',side_effect=execute), \
-                 patch.object(QFileDialog,'getOpenFileName',return_value=(str(path),'')) as choose, \
-                 patch.object(QMessageBox,'question',return_value=QMessageBox.Yes):
+                  patch('packscope.actions.shutil.which',side_effect=lambda s:'/usr/bin/'+s), \
+                  patch('packscope.actions.preview_operation',return_value=OperationPreview(True,('安裝：example → 1',))), \
+                  patch('packscope.actions.execute',side_effect=execute), \
+                  patch.object(QFileDialog,'getOpenFileName',return_value=(str(path),'')) as choose, \
+                  patch.object(QMessageBox,'exec_',return_value=QMessageBox.Yes):
                 w=Window(self.settings); w.show()
                 try:
                     self.wait_for(lambda:w.thread is None)
@@ -95,10 +97,11 @@ class OutputUITests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp)/'example.deb'; path.write_bytes(b'fixture')
             with patch('packscope.app.scan_all',side_effect=scan), \
-                 patch('packscope.actions.shutil.which',side_effect=lambda s:'/usr/bin/'+s), \
-                 patch('packscope.actions.execute',return_value='done'), \
-                 patch.object(QFileDialog,'getOpenFileName',return_value=(str(path),'')), \
-                 patch.object(QMessageBox,'question',return_value=QMessageBox.Yes):
+             patch('packscope.actions.shutil.which',side_effect=lambda s:'/usr/bin/'+s), \
+             patch('packscope.actions.preview_operation',return_value=OperationPreview(True,('安裝：example → 1',))), \
+             patch('packscope.actions.execute',return_value='done'), \
+             patch.object(QFileDialog,'getOpenFileName',return_value=(str(path),'')), \
+             patch.object(QMessageBox,'exec_',return_value=QMessageBox.Yes):
                 w=Window(self.settings); w.show()
                 try:
                     w.install_button.click()
@@ -157,9 +160,10 @@ class OutputUITests(unittest.TestCase):
         def execute(op,on_output,on_progress):
             on_output('fixture output '+op.package.ident); on_progress(25); return 'done'
         with patch('packscope.app.scan_all',return_value=[ScanResult('APT / dpkg',[first,second],'ok')]), \
-             patch('packscope.actions.make_operation',side_effect=make_op), \
-             patch('packscope.actions.execute',side_effect=execute), \
-             patch.object(QMessageBox,'question',return_value=QMessageBox.Yes):
+              patch('packscope.actions.make_operation',side_effect=make_op), \
+              patch('packscope.actions.preview_operation',return_value=OperationPreview(True,('更新：example 1 → 2',))), \
+              patch('packscope.actions.execute',side_effect=execute), \
+              patch.object(QMessageBox,'exec_',return_value=QMessageBox.Yes):
             w=Window(self.settings); w.resize(920,580); w.show()
             try:
                 self.wait_for(lambda:w.thread is None)
@@ -196,6 +200,52 @@ class OutputUITests(unittest.TestCase):
                 self.assertIn('APT / dpkg 1 項',history)
                 self.assertIn('AppImage 尚未檢查',history)
                 self.assertIn('fixture output first',history)
+            finally:
+                self.wait_for(lambda:not w.jobs and w.thread is None)
+                w.close(); self.app.processEvents()
+
+    def test_idle_operation_warning_and_close_request_are_actionable(self):
+        with patch('packscope.app.scan_all',return_value=[]):
+            w=Window(self.settings); w.show()
+            try:
+                self.wait_for(lambda:w.thread is None)
+                w.operation_idle_warning_seconds=0
+                w.start_operation_monitor('測試套件操作')
+                w.operation_last_output_at=time.monotonic()-2
+                w.check_operation_activity()
+                self.assertIn('沒有新輸出',w.status.text())
+                self.assertIn('授權視窗',w.status.text())
+
+                class RunningTask:
+                    def isRunning(self): return True
+                task=RunningTask(); w.jobs.add(task)
+                w.operation_busy=True
+                w.close(); self.app.processEvents()
+                self.assertTrue(w.isVisible())
+                self.assertIn('套件作業仍在執行',w.status.text())
+                w.jobs.remove(task)
+                w.operation_busy=False
+                w.stop_operation_monitor()
+            finally:
+                w.jobs.clear(); w.stop_operation_monitor()
+                w.operation_busy=False
+                w.close(); self.app.processEvents()
+
+    def test_failed_apt_preview_is_explicit_and_declining_never_runs_operation(self):
+        package=Package('Example','example','1','APT / dpkg','系統')
+        with patch('packscope.app.scan_all',return_value=[ScanResult('APT / dpkg',[package],'ok')]), \
+             patch('packscope.actions.shutil.which',side_effect=lambda name:'/usr/bin/'+name), \
+             patch('packscope.actions.preview_operation',return_value=OperationPreview(False,warning='模擬逾時')), \
+             patch('packscope.actions.execute') as execute, \
+             patch.object(QMessageBox,'exec_',return_value=QMessageBox.No):
+            w=Window(self.settings); w.show()
+            try:
+                self.wait_for(lambda:w.thread is None)
+                w.perform_operation(package,'remove')
+                self.wait_for(lambda:not w.operation_busy and not w.jobs)
+                execute.assert_not_called()
+                self.assertIn('已取消移除',w.status.text())
+                self.assertIn('無法取得 APT 變更預覽',w.operation_output.toPlainText())
             finally:
                 self.wait_for(lambda:not w.jobs and w.thread is None)
                 w.close(); self.app.processEvents()

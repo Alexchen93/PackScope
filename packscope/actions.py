@@ -25,6 +25,16 @@ class Operation:
     needs_auth: bool
 
 
+@dataclass(frozen=True)
+class OperationPreview:
+    available: bool
+    changes: tuple = ()
+    summary: str = ''
+    warning: str = ''
+    notice: str = ''
+    output: str = ''
+
+
 def search_apt(query):
     query = query.strip()
     if not query or len(query) > 100:
@@ -169,6 +179,94 @@ def make_operation(package: Package, action: str, remote: str = 'flathub') -> Op
     else:
         raise ValueError('這個來源尚未支援此操作。')
     return Operation(action, package, tuple(argv), auth)
+
+
+APT_INSTALL = re.compile(r'^Inst\s+(\S+)(?:\s+\[([^\]]+)\])?\s+\(([^)\s]+)')
+APT_REMOVE = re.compile(r'^Remv\s+(\S+)(?:\s+\[([^\]]+)\])?')
+
+
+def _parse_apt_preview(output):
+    changes, summary = [], ''
+    for line in output.splitlines():
+        match = APT_INSTALL.match(line)
+        if match:
+            name, current, candidate = match.groups()
+            if current:
+                changes.append(f'版本變更：{name} {current} → {candidate}')
+            else:
+                changes.append(f'安裝：{name} → {candidate}')
+            continue
+        match = APT_REMOVE.match(line)
+        if match:
+            name, current = match.groups()
+            changes.append(f'移除：{name}' + (f' {current}' if current else ''))
+        if 'upgraded,' in line and 'newly installed,' in line and 'to remove' in line:
+            summary = line.strip()
+    return tuple(changes), summary
+
+
+def _preview_apt_targets(action, targets, timeout):
+    try:
+        args = [_binary('apt-get'), '-s', '-o', 'Debug::NoLocking=1', '-o', 'Dpkg::Use-Pty=0', 'install']
+        if action == 'update':
+            args.append('--only-upgrade')
+        elif action == 'remove':
+            args[-1] = 'remove'
+        args.extend(['--', *targets])
+        env = dict(os.environ, LC_ALL='C', LANGUAGE='C', DEBIAN_FRONTEND='noninteractive')
+        result = subprocess.run(args, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                errors='replace', env=env, timeout=timeout, check=False)
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        output = getattr(exc, 'stdout', None) or getattr(exc, 'output', None) or ''
+        if isinstance(output, bytes):
+            output = output.decode('utf-8', errors='replace')
+        output = str(output).strip()[-8000:]
+        return OperationPreview(False, warning=str(exc) or type(exc).__name__, output=output)
+
+    full_output = '\n'.join(part for part in (result.stdout, result.stderr) if part).strip()
+    output = full_output[-8000:]
+    if result.returncode != 0:
+        return OperationPreview(False, warning=f'APT 模擬結束代碼為 {result.returncode}。', output=output)
+    changes, summary = _parse_apt_preview(full_output)
+    return OperationPreview(True, changes, summary, output=output)
+
+
+def preview_operations(operations, timeout: int = 90) -> OperationPreview:
+    """Simulate selected APT operations together; other managers remain unpreviewed."""
+    apt_operations = [op for op in operations if op.package.manager == 'APT / dpkg']
+    unsupported = sorted({op.package.manager for op in operations if op.package.manager != 'APT / dpkg'})
+    if not apt_operations:
+        return OperationPreview(False, warning='所選來源不支援變更預覽。')
+    actions = {op.action for op in apt_operations}
+    if len(actions) != 1 or not actions.issubset({'install', 'update', 'remove'}):
+        return OperationPreview(False, warning='所選 APT 操作種類不同，無法合併模擬。')
+
+    action = next(iter(actions))
+    targets = []
+    for operation in apt_operations:
+        target = operation.package.ident
+        if action == 'install' and operation.package.location:
+            path = Path(operation.package.location)
+            if path.suffix.lower() != '.deb' or not path.is_file():
+                return OperationPreview(False, warning='找不到可供模擬的本機 DEB 檔案。')
+            target = str(path.resolve())
+        else:
+            try:
+                _validate(APT_ID, target)
+            except ValueError as exc:
+                return OperationPreview(False, warning=str(exc))
+        targets.append(target)
+
+    preview = _preview_apt_targets(action, targets, timeout)
+    if unsupported:
+        notice='下列來源沒有納入模擬：'+', '.join(unsupported)+'。'
+        preview=OperationPreview(preview.available,preview.changes,preview.summary,preview.warning,notice,preview.output)
+    return preview
+
+
+def preview_operation(operation: Operation, timeout: int = 90) -> OperationPreview:
+    """Simulate an APT operation without locks, privilege escalation or changes."""
+    return preview_operations([operation], timeout)
 
 
 def _appimage_desktop(path):

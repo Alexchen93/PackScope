@@ -46,6 +46,50 @@ class ActionTests(unittest.TestCase):
             self.assertTrue(op.needs_auth)
         with self.assertRaises(ValueError): actions.make_operation(package('APT / dpkg','x;touch /tmp/evil'),'remove')
 
+    @patch('packscope.actions.subprocess.run')
+    @patch('packscope.actions.shutil.which',return_value='/usr/bin/apt-get')
+    def test_apt_preview_parses_install_upgrade_removal_and_summary(self, which, run):
+        output=('Inst new-tool (2.0 Ubuntu:24.04 [amd64])\n'
+                'Inst old-tool [1.0] (1.1 Ubuntu:24.04 [amd64])\n'
+                'Remv obsolete-tool [3.0]\n'
+                '2 upgraded, 1 newly installed, 1 to remove and 0 not upgraded.\n')
+        run.return_value=subprocess.CompletedProcess([],0,stdout=output,stderr='')
+        op=actions.Operation('remove',package('APT / dpkg','old-tool'),('/usr/bin/pkexec',),True)
+        preview=actions.preview_operation(op)
+        self.assertTrue(preview.available)
+        self.assertEqual(preview.changes,('安裝：new-tool → 2.0','版本變更：old-tool 1.0 → 1.1','移除：obsolete-tool 3.0'))
+        self.assertIn('2 upgraded',preview.summary)
+        args=run.call_args.args[0]
+        self.assertEqual(args[0],'/usr/bin/apt-get')
+        self.assertIn('-s',args)
+        self.assertEqual(args[-3:],['remove','--','old-tool'])
+        self.assertEqual(run.call_args.kwargs['stdin'],subprocess.DEVNULL)
+        self.assertEqual(run.call_args.kwargs['env']['LC_ALL'],'C')
+        self.assertNotIn('pkexec',args)
+
+    @patch('packscope.actions.subprocess.run')
+    @patch('packscope.actions.shutil.which',return_value='/usr/bin/apt-get')
+    def test_apt_batch_preview_combines_targets_and_local_deb_uses_file_path(self, which, run):
+        run.return_value=subprocess.CompletedProcess([],0,stdout='Inst one (2 repo)\nInst two (3 repo)\n',stderr='')
+        operations=[actions.Operation('update',package('APT / dpkg',name),(),True) for name in ('one','two')]
+        preview=actions.preview_operations(operations)
+        self.assertEqual(preview.changes,('安裝：one → 2','安裝：two → 3'))
+        self.assertEqual(run.call_args.args[0][-4:],['--only-upgrade','--','one','two'])
+        with tempfile.TemporaryDirectory() as tmp:
+            deb=Path(tmp)/'local package.deb'; deb.touch()
+            op=actions.Operation('install',Package(deb.stem,str(deb),'未知','APT / dpkg','系統',location=str(deb)),(),True)
+            actions.preview_operation(op)
+            args=run.call_args.args[0]
+            self.assertEqual(args[-3:],['install','--',str(deb.resolve())])
+
+    @patch('packscope.actions.subprocess.run',side_effect=subprocess.TimeoutExpired('apt-get',90))
+    @patch('packscope.actions.shutil.which',return_value='/usr/bin/apt-get')
+    def test_apt_preview_timeout_is_explicit_and_does_not_fail_the_ui(self, which, run):
+        op=actions.Operation('remove',package('APT / dpkg','example'),(),True)
+        preview=actions.preview_operation(op,timeout=90)
+        self.assertFalse(preview.available)
+        self.assertIn('timed out',preview.warning.lower())
+
     @patch('packscope.actions.shutil.which',side_effect=lambda s:'/usr/bin/'+s)
     def test_snap_flatpak_and_developer_commands(self, which):
         snap=actions.make_operation(package('Snap','firefox'),'update')
