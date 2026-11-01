@@ -25,9 +25,22 @@ PackScope 將不同來源的軟體整理到同一個介面。從搜尋、查看�
 
 ## 安裝與啟動
 
-目前主分支為 **0.2.0 開發版**，支援 Ubuntu 24.04，其他環境尚未完整驗證。需要 Python 3.11 以上，以及所使用來源對應的系統套件管理器。
+目前提供 **0.2.0 開發版** DEB 安裝檔，適用 Ubuntu 24.04；其他環境尚未完整驗證。使用各種來源時，也需要對應的系統套件管理器。
 
-從原始碼建置 DEB 安裝檔：
+### 下載安裝檔
+
+1. [下載 PackScope DEB 安裝檔](https://github.com/Alexchen93/PackScope/releases/download/v0.2.0-dev.1/packscope_0.2.0~dev1_all.deb)。
+2. 在檔案管理員中用軟體安裝程式開啟下載的 `.deb`，依畫面提示安裝。若系統沒有提供此選項，可在下載資料夾開啟終端機執行：
+
+   ```bash
+   sudo apt install ./packscope_0.2.0~dev1_all.deb
+   ```
+
+3. 安裝後，從應用程式選單開啟 **PackScope**，或在終端機執行 `packscope`。安裝時套件管理器會處理所需的系統依賴。
+
+### 從原始碼建置
+
+需要 Python 3.11 以上及 `dpkg-deb`。在 Ubuntu 上執行：
 
 ```bash
 git clone https://github.com/Alexchen93/PackScope.git
@@ -36,7 +49,7 @@ sh packaging/build-deb.sh
 sudo apt install ./dist/packscope_0.2.0~dev1_all.deb
 ```
 
-安裝後可從應用程式選單開啟 **PackScope**，或在終端機執行 `packscope`。若只想從原始碼執行，請先安裝 Python、PyQt5、python3-gi 與專案相依套件，再執行 `./packscope.sh`。各來源的管理器需另外可用。
+若只想從原始碼執行，請先安裝 Python、PyQt5、python3-gi 與專案相依套件，再執行 `./packscope.sh`。
 
 ## 使用提示
 
