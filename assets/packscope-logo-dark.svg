@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="700" height="160" viewBox="0 0 700 160">
+  <title>PackScope</title>
+  <g transform="translate(8 8) scale(.5625)">
+    <rect x="8" y="8" width="240" height="240" rx="55" fill="#262225"/>
+    <path d="M52 89V69a17 17 0 0 1 17-17h20 M167 52h20a17 17 0 0 1 17 17v20 M204 167v20a17 17 0 0 1-17 17h-20 M89 204H69a17 17 0 0 1-17-17v-20" fill="none" stroke="#ee9b7f" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+    <g fill="#f3ebe4"><rect x="73" y="79" width="110" height="26" rx="7"/><rect x="73" y="115" width="110" height="26" rx="7"/><rect x="73" y="151" width="110" height="26" rx="7"/></g>
+    <g fill="#c6674b"><rect x="82" y="86" width="12" height="12" rx="3"/><rect x="82" y="122" width="12" height="12" rx="3"/><rect x="82" y="158" width="12" height="12" rx="3"/></g>
+    <path d="M105 92h60 M105 128h45 M105 164h55" fill="none" stroke="#625450" stroke-width="5" stroke-linecap="round"/>
+  </g>
+  <text x="178" y="102" fill="#f2eeeb" font-family="DejaVu Sans, sans-serif" font-size="66" font-weight="700" letter-spacing="-2">PackScope</text>
+</svg>

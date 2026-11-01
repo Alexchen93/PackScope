@@ -21,6 +21,8 @@ class PackageBuildTests(unittest.TestCase):
             self.assertTrue((extracted/'usr/lib/packscope/packscope/app.py').is_file())
             desktop=(extracted/'usr/share/applications/packscope.desktop').read_text()
             self.assertIn('Exec=packscope',desktop)
-            self.assertTrue((extracted/'usr/share/icons/hicolor/scalable/apps/packscope.svg').is_file())
+            installed_icon=extracted/'usr/share/icons/hicolor/scalable/apps/packscope.svg'
+            self.assertTrue(installed_icon.is_file())
+            self.assertEqual(installed_icon.read_bytes(),(root/'packscope/assets/packscope.svg').read_bytes())
 
 if __name__=='__main__': unittest.main()

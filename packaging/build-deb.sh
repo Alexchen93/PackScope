@@ -12,7 +12,7 @@ cp -a "$project_dir/packscope" "$project_dir/bauh" "$stage/usr/lib/packscope/"
 find "$stage/usr/lib/packscope" -type d -name __pycache__ -prune -exec rm -rf {} +
 find "$stage/usr/lib/packscope" -type f -name '*.pyc' -delete
 cp "$project_dir/packaging/packscope.desktop" "$stage/usr/share/applications/"
-cp "$project_dir/packaging/packscope.svg" "$stage/usr/share/icons/hicolor/scalable/apps/"
+cp "$project_dir/packscope/assets/packscope.svg" "$stage/usr/share/icons/hicolor/scalable/apps/"
 cp "$project_dir/LICENSE" "$stage/usr/share/doc/packscope/copyright"
 cat > "$stage/usr/bin/packscope" <<'EOF'
 #!/bin/sh

@@ -300,6 +300,7 @@ class ThemeEditor(QDialog):
 class Window(QMainWindow):
     def __init__(self, settings=None):
         super().__init__(); self.setWindowTitle('PackScope — 軟體透視'); self.resize(1350, 820); self.setMinimumSize(920, 580)
+        self.setWindowIcon(QIcon(str(Path(__file__).resolve().parent/'assets'/'packscope.svg')))
         paths=QIcon.themeSearchPaths()
         for path in (str(Path.home()/'.local/share/icons'),str(Path.home()/'.icons'),'/usr/share/icons','/usr/local/share/icons'):
             if path not in paths and Path(path).is_dir(): paths.append(path)
@@ -750,6 +751,7 @@ class Window(QMainWindow):
 
 def main():
     app=QApplication(sys.argv); app.setApplicationName('PackScope'); app.setFont(QFont('Noto Sans CJK TC', 10))
+    app.setDesktopFileName('packscope'); app.setWindowIcon(QIcon(str(Path(__file__).resolve().parent/'assets'/'packscope.svg')))
     translator=QTranslator(app)
     if translator.load('qtbase_zh_TW',QLibraryInfo.location(QLibraryInfo.TranslationsPath)):
         app.installTranslator(translator)
