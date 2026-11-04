@@ -335,6 +335,38 @@ def progress_value(line, manager):
     return max(0, min(99, int(float(match.group(1)))))
 
 
+APT_LOCK_SIGNAL = re.compile(
+    r'(?i)(?:could not get lock|unable to acquire.{0,100}lock|held by process|'
+    r'resource temporarily unavailable|/var/(?:lib/dpkg/lock(?:-frontend)?|'
+    r'lib/apt/lists/lock|cache/apt/archives/lock))'
+)
+APT_LOCK_HOLDER = re.compile(r'(?i)held by process\s+(\d+)\s+\(([^)\r\n]+)\)')
+
+
+def explain_apt_lock_error(error, manager):
+    """Turn APT's authoritative lock failure into a user-facing recovery hint."""
+    if manager != 'APT / dpkg':
+        return None
+    text = str(error or '')
+    if not APT_LOCK_SIGNAL.search(text):
+        return None
+
+    holder = APT_LOCK_HOLDER.search(text)
+    if holder:
+        pid, process = holder.groups()
+        if 'unattended-upgr' in process.lower():
+            owner = f'Ubuntu 自動更新程序（PID {pid}）'
+        else:
+            owner = f'另一個套件管理程序「{process}」（PID {pid}）'
+        cause = f'{owner}正在使用 APT／dpkg'
+    else:
+        cause = '另一個套件管理作業正在使用 APT／dpkg'
+
+    return (f'{cause}，PackScope 暫時無法完成這項操作。\n\n'
+            '請等目前的套件操作或系統更新完成後再重試。請勿刪除鎖定檔或強制結束更新程序，'
+            '以免損壞套件資料庫。')
+
+
 def check_dpkg_health():
     """Read package states without requiring root or modifying the database."""
     env = dict(os.environ, LC_ALL='C', LANGUAGE='C')

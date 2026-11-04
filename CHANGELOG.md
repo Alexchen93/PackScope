@@ -1,6 +1,10 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [0.2.0.dev2] - 2026-11-04
+### Fixed
+- Explain APT/dpkg lock errors and identify when Ubuntu automatic updates are holding the package manager.
+- Show users how to safely retry after the active package operation completes.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 

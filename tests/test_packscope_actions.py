@@ -163,6 +163,16 @@ class ActionTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'dpkg 問題'): actions.execute(op)
         popen.assert_not_called()
 
+    def test_apt_lock_error_identifies_unattended_update_and_recovery(self):
+        error=('E: Could not get lock /var/lib/dpkg/lock-frontend. '
+               'It is held by process 15121 (unattended-upgr)')
+        hint=actions.explain_apt_lock_error(error,'APT / dpkg')
+        self.assertIn('Ubuntu 自動更新程序（PID 15121）',hint)
+        self.assertIn('完成後再重試',hint)
+        self.assertIn('請勿刪除鎖定檔',hint)
+        self.assertIsNone(actions.explain_apt_lock_error(error,'Snap'))
+        self.assertIsNone(actions.explain_apt_lock_error('APT returned code 100','APT / dpkg'))
+
     @patch('packscope.actions.subprocess.run')
     @patch('packscope.actions.shutil.which',return_value='/usr/bin/apt-cache')
     def test_apt_search_uses_literal_input(self, which, run):

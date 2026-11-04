@@ -229,6 +229,32 @@ class OutputUITests(unittest.TestCase):
                 w.operation_busy=False
                 w.close(); self.app.processEvents()
 
+    def test_apt_lock_failure_explains_system_update_and_retry(self):
+        package=Package('Example','example','1','APT / dpkg','系統')
+        operation=SimpleNamespace(action='remove',package=package,argv=('/usr/bin/apt-get',),needs_auth=False)
+        error=('操作未完成（代碼 100）。\n\nE: Could not get lock /var/lib/dpkg/lock-frontend. '
+               'It is held by process 15121 (unattended-upgr)')
+        with patch('packscope.app.scan_all',return_value=[ScanResult('APT / dpkg',[package],'ok')]), \
+             patch('packscope.actions.make_operation',return_value=operation), \
+             patch('packscope.actions.preview_operation',return_value=OperationPreview(True)), \
+             patch('packscope.actions.execute',side_effect=RuntimeError(error)), \
+             patch.object(QMessageBox,'exec_',return_value=QMessageBox.Yes), \
+             patch.object(QMessageBox,'warning') as warning:
+            w=Window(self.settings); w.show()
+            try:
+                self.wait_for(lambda:w.thread is None)
+                w.perform_operation(package,'remove')
+                self.wait_for(lambda:not w.operation_busy and not w.jobs and w.thread is None)
+                explanation='Ubuntu 自動更新程序（PID 15121）'
+                self.assertIn(explanation,w.operation_output.toPlainText())
+                self.assertIn('完成後再重試',w.operation_output.toPlainText())
+                self.assertIn('APT／dpkg 正忙碌',w.status.text())
+                warning.assert_called_once()
+                self.assertIn(explanation,warning.call_args.args[2])
+            finally:
+                self.wait_for(lambda:not w.jobs and w.thread is None)
+                w.close(); self.app.processEvents()
+
     def test_failed_apt_preview_is_explicit_and_declining_never_runs_operation(self):
         package=Package('Example','example','1','APT / dpkg','系統')
         with patch('packscope.app.scan_all',return_value=[ScanResult('APT / dpkg',[package],'ok')]), \

@@ -888,9 +888,16 @@ class Window(QMainWindow):
             self.status.setText(f'{label}未完成。' if error else f'{label}完成，正在重新整理清單。')
             if error:
                 if self.operation_bar.maximum() == 0: self.operation_bar.setRange(0,100); self.operation_bar.setValue(0)
-                self.log_event(f'{label}未完成：' + error.split('\n\n',1)[0])
-                self.write_session_log(error)
-                self.last_operation_result=f'{label}未完成：{package.name}（{package.manager}）'
+                lock_hint=actions.explain_apt_lock_error(error,package.manager)
+                self.log_event(f'{label}未完成：' + (lock_hint.splitlines()[0] if lock_hint else error.split('\n\n',1)[0]))
+                self.write_session_log((lock_hint+'\n\n' if lock_hint else '')+error)
+                if lock_hint:
+                    self.operation_output.appendPlainText(lock_hint)
+                    self.status.setText(lock_hint.splitlines()[0])
+                    self.last_operation_result=f'{label}未完成：APT／dpkg 正忙碌'
+                    QMessageBox.warning(self,'APT／dpkg 正忙碌',lock_hint)
+                else:
+                    self.last_operation_result=f'{label}未完成：{package.name}（{package.manager}）'
             else:
                 self.operation_bar.setRange(0,100); self.operation_bar.setValue(100)
                 self.log_event(f'{label}完成：{package.name}')
